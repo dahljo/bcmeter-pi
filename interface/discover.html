@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Find my bcMeter</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f5;color:#333;padding:20px}
+.wrap{max-width:600px;margin:0 auto}
+h1{font-size:1.5rem;margin-bottom:4px;color:#222}
+.sub{color:#888;font-size:0.9rem;margin-bottom:20px}
+.card{background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.08);padding:20px;margin-bottom:16px}
+.card h2{font-size:1rem;margin-bottom:12px;color:#555}
+.btn{padding:10px 22px;border:none;border-radius:6px;font-size:1rem;cursor:pointer;font-weight:500;transition:background 0.15s}
+.btn-scan{background:#2563eb;color:#fff;width:100%}.btn-scan:hover{background:#1d4ed8}
+.btn-scan:disabled{background:#93c5fd;cursor:not-allowed}
+.btn-stop{background:#ef4444;color:#fff;width:100%;margin-top:8px}.btn-stop:hover{background:#dc2626}
+.btn-download{background:#059669;color:#fff;width:100%;margin-top:8px;font-size:0.95rem}.btn-download:hover{background:#047857}
+.progress-wrap{margin-top:14px;display:none}
+.progress-bar{height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:#2563eb;transition:width 0.3s;width:0}
+.progress-text{font-size:0.85rem;color:#888;margin-top:6px}
+.results{margin-top:16px}
+.device{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;margin-bottom:8px;animation:fadeIn 0.3s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.device-info{flex:1}
+.device-name{font-weight:600;font-size:1.05rem;color:#166534}
+.device-url{font-size:0.85rem;color:#888;margin-top:2px;font-family:monospace}
+.device a.btn-open{padding:8px 16px;background:#16a34a;color:#fff;border-radius:6px;text-decoration:none;font-size:0.9rem;font-weight:500;white-space:nowrap}
+.device a.btn-open:hover{background:#15803d}
+.empty{text-align:center;padding:30px;color:#aaa;font-size:0.95rem}
+.status-msg{font-size:0.9rem;color:#666;margin-bottom:14px;padding:10px 14px;background:#f8fafc;border-radius:6px;border:1px solid #e2e8f0}
+.status-msg code{background:#e2e8f0;padding:1px 5px;border-radius:3px;font-size:0.85rem}
+.advanced-toggle{font-size:0.8rem;color:#2563eb;cursor:pointer;border:none;background:none;margin-top:10px;padding:0}
+.advanced-toggle:hover{text-decoration:underline}
+.advanced{display:none;margin-top:10px;padding-top:10px;border-top:1px solid #e5e7eb}
+.subnet-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.subnet-row input{flex:1;min-width:140px;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:0.95rem;font-family:monospace}
+.presets{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.presets button{padding:4px 10px;font-size:0.8rem;background:#e5e7eb;border:none;border-radius:4px;cursor:pointer;font-family:monospace}
+.presets button:hover{background:#d1d5db}
+.help{font-size:0.8rem;color:#999;margin-top:12px;line-height:1.5}
+.alert-box{padding:14px 16px;border-radius:8px;margin-bottom:14px;font-size:0.9rem;line-height:1.5}
+.alert-warn{background:#fef3c7;border:1px solid #fde68a;color:#92400e}
+.alert-box strong{font-weight:600}
+.direct-row{display:flex;gap:8px;align-items:center;margin-top:12px}
+.direct-row input{flex:1;min-width:120px;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:0.95rem;font-family:monospace}
+.direct-row button{padding:8px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:0.9rem;cursor:pointer;white-space:nowrap}
+.direct-row button:hover{background:#1d4ed8}
+.browser-rec{font-size:0.8rem;color:#888;margin-top:8px;line-height:1.4}
+.browser-rec strong{color:#555}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Find my bcMeter</h1>
+<p class="sub">Discover bcMeter devices on your local network</p>
+
+<div id="httpsWarning" class="card" style="display:none"></div>
+
+<div class="card">
+<div class="status-msg" id="statusMsg">Detecting your network...</div>
+<button class="btn btn-scan" id="btnScan" onclick="startScan()" disabled>Detecting network...</button>
+<button class="btn btn-stop" id="btnStop" onclick="stopScan()" style="display:none">Stop</button>
+<div class="progress-wrap" id="progressWrap">
+<div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+<div class="progress-text" id="progressText">Scanning...</div>
+</div>
+
+<button class="advanced-toggle" onclick="toggleAdvanced()">Advanced options</button>
+<div class="advanced" id="advPanel">
+<p style="font-size:0.85rem;color:#666;margin-bottom:8px"><strong>Subnet presets:</strong></p>
+<div class="presets">
+<button onclick="setSubnet('192.168.1')">192.168.1.x</button>
+<button onclick="setSubnet('192.168.0')">192.168.0.x</button>
+<button onclick="setSubnet('192.168.178')">192.168.178.x</button>
+<button onclick="setSubnet('10.0.0')">10.0.0.x</button>
+<button onclick="setSubnet('10.0.1')">10.0.1.x</button>
+</div>
+<div class="subnet-row">
+<input type="text" id="subnet" placeholder="192.168.1" value="">
+<span style="color:#aaa;font-family:monospace">.1 &ndash; .254</span>
+</div>
+
+<p style="font-size:0.85rem;color:#666;margin-top:14px;margin-bottom:6px"><strong>Try a specific IP directly:</strong></p>
+<div class="direct-row">
+<input type="text" id="directIP" placeholder="192.168.1.42">
+<button onclick="probeDirect()">Check</button>
+</div>
+</div>
+
+<p class="help">
+Scans your local network for bcMeter devices.
+Everything happens in your browser &mdash; no data is sent externally.
+</p>
+<p class="browser-rec">
+<strong>Recommended:</strong> Google Chrome or Firefox.
+Safari may not work due to privacy restrictions on local network access.
+</p>
+</div>
+
+<div class="card">
+<h2>Devices found</h2>
+<div class="results" id="results">
+<div class="empty">Click the button above to find your bcMeter.</div>
+</div>
+</div>
+</div>
+
+<script>
+var scanning=false,abortCtrl=null,found=[];
+var detectedSubnets=[];
+
+/* ── HTTPS check ──────────────────────────────────────── */
+
+function checkContext(){
+var w=document.getElementById('httpsWarning');
+if(location.protocol==='https:'){
+w.innerHTML='<div class="alert-warn alert-box">'
++'<strong>This page is loaded over HTTPS</strong>, which prevents scanning your local network.<br><br>'
++'Save this page to your computer and open the downloaded file:'
++'</div>'
++'<button class="btn btn-download" onclick="downloadSelf()">Save discover page to computer</button>'
++'<p class="help" style="margin-top:10px">Open the file in <strong>Chrome</strong> or <strong>Firefox</strong> and click &ldquo;Find my bcMeter&rdquo;.</p>';
+w.style.display='';
+} else {
+w.style.display='none';
+w.innerHTML='';
+}
+}
+
+function downloadSelf(){
+var parser=new DOMParser();
+var doc=parser.parseFromString('<!DOCTYPE html>\n<html lang="en">\n'+document.head.outerHTML+'\n'+document.body.outerHTML+'\n</html>','text/html');
+var w=doc.getElementById('httpsWarning');if(w){w.style.display='none';w.innerHTML=''}
+var b=doc.getElementById('btnScan');if(b){b.disabled=true;b.textContent='Detecting network...'}
+var s=doc.getElementById('statusMsg');if(s){s.textContent='Detecting your network...'}
+var p=doc.getElementById('progressWrap');if(p){p.style.display='none'}
+var st=doc.getElementById('btnStop');if(st){st.style.display='none'}
+var a=doc.getElementById('advPanel');if(a){a.style.display='none'}
+var r=doc.getElementById('results');if(r){r.innerHTML='<div class="empty">Click the button above to find your bcMeter.</div>'}
+var sub=doc.getElementById('subnet');if(sub){sub.value=''}
+var di=doc.getElementById('directIP');if(di){di.value=''}
+var blob=new Blob(['<!DOCTYPE html>\n'+doc.documentElement.outerHTML],{type:'text/html'});
+var el=document.createElement('a');
+el.href=URL.createObjectURL(blob);el.download='bcmeter-discover.html';el.click();
+setTimeout(function(){URL.revokeObjectURL(el.href)},1000);
+}
+
+/* ── Gateway probing for subnet detection ─────────────── */
+
+/* Build ~100 common gateway IPs. On a LAN, the gateway (.1) always
+   responds in <50ms. Unreachable ones timeout at 2s. All probed in
+   parallel, so total detection takes ~2 seconds regardless of count. */
+function buildGatewayList(){
+var gw=[];
+/* 192.168.x.1 — contiguous 0-20 (covers most home routers) */
+for(var i=0;i<=20;i++)gw.push('192.168.'+i+'.1');
+/* 192.168.x.1 — popular specific subnets */
+[25,30,31,32,40,48,50,55,60,68,77,80,86,88,90,
+100,101,102,110,111,120,128,137,150,168,172,175,
+178,179,180,188,192,200,210,220,223,230,240,250,254,255]
+.forEach(function(x){gw.push('192.168.'+x+'.1')});
+/* 10.x.y.1 */
+[0,1,2,3,5,10,20,50,100].forEach(function(y){
+gw.push('10.0.'+y+'.1');
+if(y>0)gw.push('10.'+y+'.0.1');
+});
+/* 172.16-31.0.1 */
+for(var i=16;i<=31;i++)gw.push('172.'+i+'.0.1');
+return gw;
+}
+
+function probeGateway(ip,timeoutMs){
+return new Promise(function(resolve){
+var ctrl=new AbortController();
+var timer=setTimeout(function(){ctrl.abort();resolve(false)},timeoutMs);
+fetch('http://'+ip+'/',{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
+.then(function(){clearTimeout(timer);resolve(true)})
+.catch(function(){clearTimeout(timer);resolve(false)});
+});
+}
+
+function subnetFromIP(ip){
+if(!ip)return null;
+var p=ip.split('.');
+if(p.length!==4)return null;
+return p[0]+'.'+p[1]+'.'+p[2];
+}
+
+async function autoDetect(){
+var statusEl=document.getElementById('statusMsg');
+var btnEl=document.getElementById('btnScan');
+var subnetEl=document.getElementById('subnet');
+
+statusEl.textContent='Probing gateways...';
+
+var gateways=buildGatewayList();
+var live=[];
+
+/* Fire all ~100 gateway probes in parallel — done in ~2s */
+await Promise.all(gateways.map(function(ip){
+return probeGateway(ip,2000).then(function(ok){
+if(ok)live.push(subnetFromIP(ip));
+});
+}));
+
+if(live.length>0){
+/* Deduplicate (shouldn't happen, but just in case) */
+live=live.filter(function(v,i,a){return a.indexOf(v)===i});
+detectedSubnets=live.slice();
+subnetEl.value=live[0];
+if(live.length===1){
+statusEl.innerHTML='Your network: <code>'+escHtml(live[0])+'.x</code>';
+} else {
+statusEl.innerHTML='Networks found: <code>'+live.map(function(s){return s+'.x'}).join('</code>, <code>')+'</code>';
+}
+} else {
+statusEl.innerHTML='Could not detect your network. Select your subnet under &ldquo;Advanced options&rdquo; or just hit scan to try common subnets.';
+detectedSubnets=['192.168.1','192.168.0','192.168.178','10.0.0'];
+subnetEl.value='192.168.1';
+}
+
+btnEl.textContent='Find my bcMeter';
+btnEl.disabled=false;
+}
+
+/* ── Scanning ──────────────────────────────────────────── */
+
+function setSubnet(s){
+document.getElementById('subnet').value=s;
+detectedSubnets=[s];
+document.getElementById('statusMsg').innerHTML='Subnet set to <code>'+escHtml(s)+'.x</code>';
+}
+
+function toggleAdvanced(){
+var p=document.getElementById('advPanel');
+p.style.display=p.style.display==='block'?'none':'block';
+}
+
+function stopScan(){
+if(abortCtrl){try{abortCtrl.abort()}catch(e){}}
+scanning=false;
+document.getElementById('btnScan').disabled=false;
+document.getElementById('btnScan').textContent='Scan again';
+document.getElementById('btnStop').style.display='none';
+document.getElementById('progressText').textContent='Scan stopped.';
+}
+
+async function startScan(){
+if(scanning)return;
+scanning=true;
+found=[];
+document.getElementById('results').innerHTML='';
+document.getElementById('btnScan').disabled=true;
+document.getElementById('btnStop').style.display='';
+document.getElementById('progressWrap').style.display='block';
+document.getElementById('progressFill').style.width='0%';
+
+var manualSubnet=document.getElementById('subnet').value.trim().replace(/\.$/,'');
+var subnetsToScan=[];
+if(manualSubnet){
+subnetsToScan.push(manualSubnet);
+detectedSubnets.forEach(function(s){if(s!==manualSubnet)subnetsToScan.push(s)});
+} else {
+subnetsToScan=detectedSubnets.length?detectedSubnets:['192.168.1','192.168.0','192.168.178'];
+}
+subnetsToScan=subnetsToScan.slice(0,3);
+
+abortCtrl=new AbortController();
+var signal=abortCtrl.signal;
+var BATCH=30;
+var mixedBlocked=false;
+
+for(var si=0;si<subnetsToScan.length;si++){
+if(!scanning)break;
+var subnet=subnetsToScan[si];
+var label=subnetsToScan.length>1?'Subnet '+(si+1)+'/'+subnetsToScan.length+' ('+subnet+'.x)':'';
+var ips=[];
+for(var i=1;i<=254;i++)ips.push(subnet+'.'+i);
+var done=0,total=254;
+
+document.getElementById('progressText').textContent=(label?label+' — ':'')+'Scanning...';
+
+for(var b=0;b<ips.length;b+=BATCH){
+if(!scanning)break;
+var batch=ips.slice(b,b+BATCH);
+var promises=batch.map(function(ip){
+return probeIP(ip,signal).then(function(r){
+if(r==='blocked')mixedBlocked=true;
+}).finally(function(){
+done++;
+var pct=subnetsToScan.length>1
+?Math.round(((si*254+done)/(subnetsToScan.length*254))*100)
+:Math.round(done/total*100);
+document.getElementById('progressFill').style.width=pct+'%';
+document.getElementById('progressText').textContent=(label?label+' — ':'')+done+'/'+total+' ('+found.length+' found)';
+});
+});
+await Promise.all(promises);
+if(mixedBlocked&&found.length===0&&done>=BATCH)break;
+}
+
+if(mixedBlocked&&found.length===0)break;
+if(found.length>0&&si<subnetsToScan.length-1){
+document.getElementById('progressText').textContent='Found '+found.length+' device'+(found.length!==1?'s':'')+'.';
+break;
+}
+}
+
+scanning=false;
+document.getElementById('btnScan').disabled=false;
+document.getElementById('btnScan').textContent='Scan again';
+document.getElementById('btnStop').style.display='none';
+
+if(found.length===0){
+if(mixedBlocked){
+document.getElementById('results').innerHTML='<div class="empty">'
++'<strong>Browser blocked local network access.</strong><br>'
++'This happens on HTTPS pages.<br><br>'
++'Save this page to your computer and open the file in Chrome or Firefox.</div>';
+} else {
+var tried=subnetsToScan.map(function(s){return s+'.x'}).join(', ');
+document.getElementById('results').innerHTML='<div class="empty">No bcMeter found on '+escHtml(tried)+'.<br>'
++'Make sure your computer is on the same WiFi as your bcMeter.<br>'
++'Try entering the IP directly under &ldquo;Advanced options&rdquo;.</div>';
+}
+}
+document.getElementById('progressText').textContent='Done. '+found.length+' device'+(found.length!==1?'s':'')+' found.';
+document.getElementById('progressFill').style.width='100%';
+}
+
+function probeIP(ip,signal){
+var url='http://'+ip+'/api/status';
+var ctrl=new AbortController();
+var onAbort=function(){ctrl.abort()};
+signal.addEventListener('abort',onAbort);
+var timer=setTimeout(function(){ctrl.abort()},2500);
+return fetch(url,{signal:ctrl.signal,mode:'cors',cache:'no-store'})
+.then(function(r){
+clearTimeout(timer);signal.removeEventListener('abort',onAbort);
+if(!r.ok)throw new Error();return r.json();
+})
+.then(function(data){
+if(data&&(data.name||data.sampling!==undefined))addDevice(ip,data);
+return 'ok';
+})
+.catch(function(err){
+clearTimeout(timer);signal.removeEventListener('abort',onAbort);
+if(location.protocol==='https:'&&err&&err.message&&
+(err.message.indexOf('Mixed Content')!==-1||err.message.indexOf('Failed to fetch')!==-1))
+return 'blocked';
+return 'error';
+});
+}
+
+/* ── Direct IP check ──────────────────────────────────── */
+
+async function probeDirect(){
+var ip=document.getElementById('directIP').value.trim();
+if(!ip)return;
+if(!/^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/.test(ip)){
+alert('Please enter a valid IP address (e.g. 192.168.1.42)');return;
+}
+try{
+var ctrl=new AbortController();
+var timer=setTimeout(function(){ctrl.abort()},5000);
+var r=await fetch('http://'+ip+'/api/status',{mode:'cors',cache:'no-store',signal:ctrl.signal});
+clearTimeout(timer);
+if(!r.ok)throw new Error();
+var data=await r.json();
+if(data&&(data.name||data.sampling!==undefined)){
+addDevice(ip,data);alert('bcMeter found at '+ip+'!');
+} else {
+alert('Device at '+ip+' responded but is not a bcMeter.');
+}
+}catch(e){
+alert('Could not reach '+ip+'.\nMake sure the device is on and on the same WiFi.');
+}
+}
+
+/* ── Device list ──────────────────────────────────────── */
+
+function addDevice(ip,data){
+for(var i=0;i<found.length;i++)if(found[i].ip===ip)return;
+var name=data.name||'bcMeter';
+var version=data.version||'';
+found.push({ip:ip,name:name});
+var el=document.createElement('div');
+el.className='device';
+el.innerHTML='<div class="device-info">'
++'<div class="device-name">'+escHtml(name)+'</div>'
++'<div class="device-url">'+escHtml(ip)+(version?' &middot; v'+escHtml(version):'')+'</div>'
++'</div>'
++'<a class="btn-open" href="http://'+ip+'/" target="_blank">Open</a>';
+document.getElementById('results').appendChild(el);
+}
+
+function escHtml(s){
+var d=document.createElement('div');d.textContent=s;return d.innerHTML;
+}
+
+/* ── Init ──────────────────────────────────────────────── */
+checkContext();
+autoDetect();
+</script>
+</body>
+</html>

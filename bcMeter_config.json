@@ -1,0 +1,410 @@
+{
+    "sample_time": {
+        "value": 300,
+        "description": "Time between samples (s)",
+        "type": "number",
+        "parameter": "session"
+    },
+    "automatic_airflow_control": {
+        "value": false,
+        "description": "Auto-adjust airflow by loading",
+        "type": "boolean",
+        "parameter": "session"
+    },
+    "airflow_per_minute": {
+        "value": 0.25,
+        "description": "Airflow per minute (L)",
+        "type": "number",
+        "parameter": "session"
+    },
+    "autostart_logging": {
+        "value": false,
+        "description": "Auto-start logging after boot",
+        "type": "boolean",
+        "parameter": "session"
+    },
+    "mobile_sampling": {
+        "value": false,
+        "description": "Mobile measurement mode (log GPS per sample)",
+        "type": "boolean",
+        "parameter": "session"
+    },
+    "outdoor_measurement": {
+        "value": true,
+        "description": "Outdoor measurement \u2014 please disable when taking indoor or emission control measurements",
+        "type": "boolean",
+        "parameter": "session"
+    },
+    "location_mode": {
+        "value": 1,
+        "description": "Location mode (0=off,1=auto,2=manual)",
+        "type": "number",
+        "parameter": "session"
+    },
+    "location_lat": {
+        "value": 0.0,
+        "description": "Manual latitude",
+        "type": "number",
+        "parameter": "session"
+    },
+    "location_lon": {
+        "value": 0.0,
+        "description": "Manual longitude",
+        "type": "number",
+        "parameter": "session"
+    },
+    "disable_led": {
+        "value": false,
+        "description": "Disable blinking LED",
+        "type": "boolean",
+        "parameter": "device"
+    },
+    "warmup_seconds": {
+        "value": 600,
+        "description": "Warm-up time (s)",
+        "type": "number",
+        "parameter": "device"
+    },
+    "timezone": {
+        "value": "UTC0",
+        "description": "Timezone",
+        "type": "string",
+        "parameter": "device"
+    },
+    "show_undervoltage_warning": {
+        "value": false,
+        "description": "Display undervoltage warnings",
+        "type": "boolean",
+        "parameter": "device"
+    },
+    "sample_spot_diameter": {
+        "value": 0.4,
+        "description": "Sample spot diameter (cm)",
+        "type": "number",
+        "parameter": "dev:calibration"
+    },
+    "filter_scattering_factor": {
+        "value": 1.39,
+        "description": "Filter scattering factor",
+        "type": "number",
+        "parameter": "dev:calibration"
+    },
+    "device_specific_correction_factor": {
+        "value": 1.0,
+        "description": "Device correction factor",
+        "type": "number",
+        "parameter": "dev:calibration"
+    },
+    "ap_secured": {
+        "value": false,
+        "description": "Protect hotspot with password",
+        "type": "boolean",
+        "parameter": "device"
+    },
+    "ap_password": {
+        "value": "bcMeterbcMeter",
+        "description": "Hotspot password",
+        "type": "string",
+        "parameter": "device"
+    },
+    "disable_pump_control": {
+        "value": false,
+        "description": "Disable internal pump control",
+        "type": "boolean",
+        "parameter": "device"
+    },
+    "airflow_sensor": {
+        "value": true,
+        "description": "Airflow sensor available",
+        "type": "boolean",
+        "parameter": "device"
+    },
+    "af_sensor_type": {
+        "value": 1,
+        "description": "Airflow sensor type (0=P0001A1, 1=P0010A2)",
+        "type": "number",
+        "parameter": "device"
+    },
+    "run_hotspot": {
+        "value": false,
+        "description": "Hotspot mode",
+        "type": "boolean",
+        "parameter": "device"
+    },
+    "send_log_by_mail": {
+        "value": false,
+        "description": "Periodically send logs by mail",
+        "type": "boolean",
+        "parameter": "email"
+    },
+    "mail_logs_to": {
+        "value": "your@email.address",
+        "description": "Email address(es) for logs",
+        "type": "string",
+        "parameter": "email"
+    },
+    "filter_status_mail": {
+        "value": false,
+        "description": "Mail on filter change suggestion",
+        "type": "boolean",
+        "parameter": "email"
+    },
+    "mail_sending_interval": {
+        "value": 24.0,
+        "description": "Send logs every X hours",
+        "type": "number",
+        "parameter": "email"
+    },
+    "share_with_bcmeter": {
+        "value": false,
+        "description": "Share data with bcMeter team",
+        "type": "boolean",
+        "parameter": "email"
+    },
+    "send_verbose_emails": {
+        "value": false,
+        "description": "Send verbose diagnostic emails",
+        "type": "boolean",
+        "parameter": "email"
+    },
+    "led_duty_cycle_370nm": {
+        "value": 255,
+        "description": "370nm UV LED brightness",
+        "type": "number",
+        "parameter": "dev:optical"
+    },
+    "led_duty_cycle_520nm": {
+        "value": 255,
+        "description": "520nm Green LED brightness",
+        "type": "number",
+        "parameter": "dev:optical"
+    },
+    "led_duty_cycle_880nm": {
+        "value": 100,
+        "description": "880nm IR LED brightness",
+        "type": "number",
+        "parameter": "dev:optical"
+    },
+    "cal_k_370nm": {
+        "value": 1.0,
+        "description": "Calibration factor 370nm",
+        "type": "number",
+        "parameter": "dev:optical"
+    },
+    "cal_k_520nm": {
+        "value": 1.0,
+        "description": "Calibration factor 520nm",
+        "type": "number",
+        "parameter": "dev:optical"
+    },
+    "cal_k_880nm": {
+        "value": 1.0,
+        "description": "Calibration factor 880nm",
+        "type": "number",
+        "parameter": "dev:optical"
+    },
+    "shadow_factor": {
+        "value": 1.2,
+        "description": "Weingartner shadow factor f (1.1 diesel, 1.2 urban, 1.5 biomass)",
+        "type": "number",
+        "parameter": "dev:optical"
+    },
+    "adc_low_limit": {
+        "value": 0.5,
+        "description": "Min ADC voltage before error (V)",
+        "type": "number",
+        "parameter": "dev:optical"
+    },
+    "pump_dutycycle": {
+        "value": 20,
+        "description": "Pump power (0-255)",
+        "type": "number",
+        "parameter": "dev:pump"
+    },
+    "max_pump_duty": {
+        "value": 255,
+        "description": "Maximum pump duty cycle",
+        "type": "number",
+        "parameter": "dev:pump"
+    },
+    "min_pump_duty": {
+        "value": 0,
+        "description": "Minimum pump duty cycle",
+        "type": "number",
+        "parameter": "dev:pump"
+    },
+    "min_airflow_ml": {
+        "value": 70,
+        "description": "Minimum airflow (ml/min)",
+        "type": "number",
+        "parameter": "dev:pump"
+    },
+    "twelvevolt_duty": {
+        "value": 20,
+        "description": "12V pump duty cycle",
+        "type": "number",
+        "parameter": "dev:pump"
+    },
+    "reverse_dutycycle": {
+        "value": false,
+        "description": "Reverse pump duty cycle",
+        "type": "boolean",
+        "parameter": "dev:pump"
+    },
+    "TWELVEVOLT_ENABLE": {
+        "value": false,
+        "description": "Enable 12V power output",
+        "type": "boolean",
+        "parameter": "dev:pump"
+    },
+    "log_pump_duty": {
+        "value": false,
+        "description": "Log pump duty cycle per sample in CSV",
+        "type": "boolean",
+        "parameter": "dev:pump"
+    },
+    "afc_bc_low": {
+        "value": 300.0,
+        "description": "AFC: BC below this = max flow (ng)",
+        "type": "number",
+        "parameter": "dev:afc"
+    },
+    "afc_bc_high": {
+        "value": 2000.0,
+        "description": "AFC: BC above this = min flow (ng)",
+        "type": "number",
+        "parameter": "dev:afc"
+    },
+    "afc_flow_low": {
+        "value": 0.05,
+        "description": "AFC: min airflow (LPM)",
+        "type": "number",
+        "parameter": "dev:afc"
+    },
+    "afc_flow_high": {
+        "value": 0.7,
+        "description": "AFC: max airflow (LPM)",
+        "type": "number",
+        "parameter": "dev:afc"
+    },
+    "afc_slope_gain": {
+        "value": 0.05,
+        "description": "AFC: flow boost per 100ng/min descent",
+        "type": "number",
+        "parameter": "dev:afc"
+    },
+    "ambient_pressure_correction": {
+        "value": true,
+        "description": "Correct BC for ambient pressure",
+        "type": "boolean",
+        "parameter": "dev:calibration"
+    },
+    "enable_wifi": {
+        "value": true,
+        "description": "Enable WiFi",
+        "type": "boolean",
+        "parameter": "dev:hardware"
+    },
+    "iot_enable": {
+        "value": false,
+        "description": "4G/IOT connectivity",
+        "type": "boolean",
+        "parameter": "dev:hardware"
+    },
+    "swap_channels": {
+        "value": false,
+        "description": "Swap data channels",
+        "type": "boolean",
+        "parameter": "dev:hardware"
+    },
+    "spi_vref": {
+        "value": 4.096,
+        "description": "Reference voltage for SPI ADC",
+        "type": "number",
+        "parameter": "dev:hardware"
+    },
+    "use_display": {
+        "value": false,
+        "description": "Device has display",
+        "type": "boolean",
+        "parameter": "dev:hardware"
+    },
+    "num_channels": {
+        "value": 1,
+        "description": "Number of channels",
+        "type": "number",
+        "parameter": "dev:system"
+    },
+    "is_ebcMeter": {
+        "value": false,
+        "description": "Direct emission measurement mode",
+        "type": "boolean",
+        "parameter": "dev:system"
+    },
+    "device_name": {
+        "value": "bcMeter",
+        "description": "Device name",
+        "type": "string",
+        "parameter": "dev:system"
+    },
+    "email_api_key": {
+        "value": "",
+        "description": "Email service API key",
+        "type": "string",
+        "parameter": "dev:system"
+    },
+    "email_service_password": {
+        "value": "email_service_password",
+        "description": "Legacy email service API key",
+        "type": "string",
+        "parameter": "dev:system"
+    },
+    "onboarding_step_one": {
+        "value": false,
+        "description": "Phase 1 onboarding complete (WiFi+email)",
+        "type": "boolean",
+        "parameter": "dev:system"
+    },
+    "onboarding_step_two": {
+        "value": false,
+        "description": "Phase 2 onboarding complete (cal+sharing)",
+        "type": "boolean",
+        "parameter": "dev:system"
+    },
+    "team_upload_interval": {
+        "value": 1.0,
+        "description": "Cloud sync interval (hours, gated by share_with_bcmeter)",
+        "type": "number",
+        "parameter": "dev:system"
+    },
+    "bcmeter_team_email": {
+        "value": "",
+        "description": "bcMeter team contact email",
+        "type": "string",
+        "parameter": "dev:system"
+    },
+    "heating": {
+        "value": false,
+        "description": "Enable heating",
+        "type": "boolean",
+        "parameter": "dev:system"
+    },
+    "last_cal_time": {
+        "value": "never",
+        "description": "Last calibration timestamp",
+        "type": "string",
+        "parameter": "dev:system"
+    },
+    "filter_days": {
+        "value": 7,
+        "description": "Target filter lifetime (days)",
+        "type": "number",
+        "parameter": "session"
+    },
+    "bc_filter": {
+        "value": "median3",
+        "description": "BC smoothing (median3, ema, kalman)",
+        "type": "string",
+        "parameter": "session"
+    }
+}
