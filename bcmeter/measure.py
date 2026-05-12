@@ -36,6 +36,7 @@ REF_MIN_LED_ON = 0.05
 FLOW_SAMPLE_INTERVAL_S = 0.25
 OUTLIER_REJECT_PCT = 0.20
 PRIME_DURATION_S = 2.0
+LED_SETTLE_S = 0.2
 SIGMA_REJECT_LIMIT = 3.0
 SHADOW_FACTOR = 1.2
 LED_DUTY_FLOOR_DEFAULT = 30
@@ -210,8 +211,8 @@ class MeasureEngine:
 
     def get_loading_pct(self) -> float:
         """Current filter loading as percentage (0-100)."""
-        ref = state.last_ref
-        sen = state.last_sen
+        ref = state.get("last_ref")
+        sen = state.get("last_sen")
         if ref <= 0:
             return 0.0
         pct = (1.0 - sen / ref) * 100.0
@@ -226,6 +227,14 @@ class MeasureEngine:
         if self._session_start_time <= 0:
             return 0.0
         return (time.time() - self._session_start_time) / 3600.0
+
+    def get_session_avg_bc(self) -> float:
+        """Average BC concentration over the current session."""
+        return self._bc_stats.session_avg()
+
+    def get_hour_avg_bc(self) -> float:
+        """Average BC concentration over the last hour."""
+        return self._bc_stats.hour_avg()
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -454,9 +463,9 @@ class MeasureEngine:
         self._next_session_indoor_override = False
         self._session_row_count = 0
 
-        last_team_upload_time = time.time()
         email_handler.reset_team_offset()
-        last_log_mail_time = time.time()
+        email_handler.reset_log_mail_offset()
+        email_handler.reset_periodic_timers()
 
         # Capture the crash-resume hint BEFORE start_session rewrites the
         # persistent session flag; used below to skip mod-5 alignment so
@@ -466,7 +475,7 @@ class MeasureEngine:
         # ---- Start storage session ----
         sps_present = self._sps is not None and self._sps.present
         try:
-            self._storage.start_session()
+            session_file = self._storage.start_session()
         except Exception:
             logger.exception("Storage session start failed")
             self._set_error(ErrorCode.ERR_NONE)
@@ -474,6 +483,7 @@ class MeasureEngine:
             return
 
         email_handler.set_session_start()
+        email_handler.send_session_start(session_file)
 
         # ---- Prime channels ----
         for ch in range(num_ch):
@@ -523,7 +533,8 @@ class MeasureEngine:
         # Cadence tracking: each cycle's START is exactly sample_time seconds
         # after the previous cycle's START (monotonic so NTP steps don't
         # perturb the schedule).  The first cycle starts at alignment-end
-        # (= now).  Overruns skip missed slots instead of piling up.
+        # (= now).  Only skip slots when a full sample window was actually
+        # missed; small upload/email overruns should not create 5-minute gaps.
         next_cycle_start = time.monotonic()
         first_cadence_cycle = True
         prev_cycle_start_monotonic = next_cycle_start  # BC integration interval tracker
@@ -533,8 +544,7 @@ class MeasureEngine:
 
             # Wait until this cycle's scheduled start.  On the first
             # cycle we start immediately; on subsequent cycles we block
-            # until the deadline, or skip past missed slots if we've
-            # overrun by more than 1 s.
+            # until the deadline, or skip past only fully missed slots.
             if not first_cadence_cycle:
                 now_mono = time.monotonic()
                 delta = next_cycle_start - now_mono
@@ -543,16 +553,15 @@ class MeasureEngine:
                         return
                     if not state.sampling:
                         break
-                elif delta < -1.0:
-                    slot = float(sample_time_sec)
+                else:
+                    slot = max(1.0, float(sample_time_sec))
                     skip = int((-delta) // slot)
-                    if skip <= 0:
-                        skip = 1
-                    next_cycle_start += skip * slot
-                    logger.warning(
-                        "Cycle overrun by %.1fs — skipping %d slot(s) to catch up",
-                        -delta, skip,
-                    )
+                    if skip > 0:
+                        next_cycle_start += skip * slot
+                        logger.warning(
+                            "Cycle overrun by %.1fs - skipping %d full slot(s) to catch up",
+                            -delta, skip,
+                        )
             first_cadence_cycle = False
             # Advance to next cycle's scheduled start.
             next_cycle_start += float(sample_time_sec)
@@ -636,32 +645,6 @@ class MeasureEngine:
             else:
                 remaining = int(self._warmup_end - time.time())
                 logger.debug("Warmup: %ds remaining", remaining)
-
-            # ---- Team sharing (configurable interval, independent of email) ----
-            if self._cfg.get_bool("share_with_bcmeter", False):
-                team_interval_s = max(60, self._cfg.get_float("team_upload_interval", 1.0) * 3600)
-                if time.time() - last_team_upload_time > team_interval_s:
-                    try:
-                        email_handler.send_team_log()
-                    except Exception:
-                        logger.debug("Team upload failed")
-                    last_team_upload_time = time.time()
-
-            # ---- Periodic log email (parity with ESP32 email_handler loop) ----
-            if self._cfg.get_bool("send_log_by_mail", False):
-                log_interval_s = max(60, self._cfg.get_float("mail_sending_interval", 24.0) * 3600)
-                if time.time() - last_log_mail_time > log_interval_s:
-                    try:
-                        email_handler.send_current_log(
-                            bc_session_avg=self._bc_stats.session_avg(),
-                            bc_hour_avg=self._bc_stats.hour_avg(),
-                            loading_pct=self.get_loading_pct(),
-                            session_hours=self.get_session_hours(),
-                            initial_loading_pct=self.get_initial_loading_pct(),
-                        )
-                    except Exception:
-                        logger.debug("Periodic log email failed")
-                    last_log_mail_time = time.time()
 
         # ---- Session teardown ----
         self._optics.all_off()
@@ -865,10 +848,11 @@ class MeasureEngine:
         aborted = False
         debug_mode = state.get("debug_mode")
         _dbg_interval = 50  # log every Nth read in debug mode
+        keep_single_led_on = num_ch == 1
 
         for ch in range(num_ch):
             self._optics.led_on(ch)
-            time.sleep(0.0005)  # 500us settling
+            time.sleep(LED_SETTLE_S)
             ch_start = time.time()
 
             while (time.time() - ch_start) < ch_duration:
@@ -902,6 +886,9 @@ class MeasureEngine:
                     ch_high_counts[ch] += 1
                 elif s_cal < adc_low_limit or r < adc_low_limit:
                     adc_low_total += 1
+                    if s_cal > 0.0 and r > 0.0:
+                        sen_bufs[ch].append(s_cal)
+                        ref_bufs[ch].append(r)
                 else:
                     sen_bufs[ch].append(s_cal)
                     ref_bufs[ch].append(r)
@@ -938,7 +925,8 @@ class MeasureEngine:
                 if aborted:
                     break
 
-            self._optics.led_off(ch)
+            if aborted or not keep_single_led_on:
+                self._optics.led_off(ch)
 
             # --- Outlier rejection / LED recovery ---
             if not aborted and raw_counts[ch] > 0:
@@ -1002,7 +990,8 @@ class MeasureEngine:
             if aborted:
                 break
 
-        self._optics.all_off()
+        if aborted or not keep_single_led_on:
+            self._optics.all_off()
 
         if debug_mode:
             for ch in range(num_ch):

@@ -3556,7 +3556,7 @@ if(fileInput.files.length===0){alert('Please select a file');return;}
 if(!confirm('Install "'+fileInput.files[0].name+'" on the device?\nThe device will restart after the update.'))return;
 const file=fileInput.files[0];
 const formData=new FormData();
-formData.append('update',file);
+formData.append('file',file);
 otaRebootStarted=false;
 otaReloadTriggered=false;
 otaSawOffline=false;

@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from typing import Optional
 
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import PlainTextResponse
@@ -135,13 +136,19 @@ def _apply_update(archive_path: str, original_filename: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/update")
-async def api_update(file: UploadFile = File(...)):
+async def api_update(
+    file: Optional[UploadFile] = File(None),
+    update: Optional[UploadFile] = File(None),
+):
     """Accept an uploaded archive, extract it, and restart the service.
 
     The uploaded file should be a ``.tar.gz`` or ``.zip`` archive
     containing the new bcmeter code.
     """
     global _update_running
+    upload = file or update
+    if upload is None:
+        return PlainTextResponse("Missing update file", status_code=400)
 
     with _update_lock:
         if _update_running:
@@ -156,7 +163,7 @@ async def api_update(file: UploadFile = File(...)):
     # Save uploaded file to a temporary location
     try:
         suffix = ""
-        filename = file.filename or "update.tar.gz"
+        filename = upload.filename or "update.tar.gz"
         if filename.endswith(".tar.gz") or filename.endswith(".tgz"):
             suffix = ".tar.gz"
         elif filename.endswith(".zip"):
@@ -167,7 +174,7 @@ async def api_update(file: UploadFile = File(...)):
         fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="bcmeter_upload_")
         with os.fdopen(fd, "wb") as tmp:
             while True:
-                chunk = await file.read(65536)
+                chunk = await upload.read(65536)
                 if not chunk:
                     break
                 tmp.write(chunk)

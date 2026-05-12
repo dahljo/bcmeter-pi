@@ -6,13 +6,16 @@ This repository replaces the legacy Raspberry Pi codebase with a redesign focuse
 
 ## Features
 
+- Optical absorption measurement for black carbon monitoring
 - ADS8344E (SPI) + MCP342X (I2C) ADC support
 - FastAPI-based web API and configuration interface
+- OTA updates via GitHub Releases
+- CSV data logging with session management
 - Optional BME280 / SHT4x environmental sensors
 - Optional SPS30 particulate matter sensor
 - Optional GPS positioning
 - Optional SIM7080G cellular modem support
-- Multi-wavelength measurement support is implemented by software and hardware but the case design is not ready yet
+- Multi-wavelength measurement support is in development
 
 ## Installation
 

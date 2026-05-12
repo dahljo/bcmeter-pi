@@ -61,6 +61,7 @@ from bcmeter.wifimgr import NetworkManager
 from bcmeter.gps import GPS
 from bcmeter.bme280 import BME280
 from bcmeter.email_handler import init_sender as init_email_sender
+from bcmeter.email_handler import init_periodic_loop as init_email_periodic_loop
 from bcmeter.email_handler import get_configured_api_key
 from bcmeter import incident_log, geoloc, qnh, timesync, ota_check
 from bcmeter import avahi_alias
@@ -268,8 +269,19 @@ def main():
     # Network manager
     network_mgr = NetworkManager(cfg, base_dir=BASE_DIR)
 
-    # Email sender
+    # Email sender + ESP32-parity periodic loop outside the measure thread
     init_email_sender()
+    init_email_periodic_loop(
+        stop_event,
+        session_active_fn=lambda: storage.session_active,
+        measure_stats_fn=lambda: {
+            "bc_session_avg": engine.get_session_avg_bc(),
+            "bc_hour_avg": engine.get_hour_avg_bc(),
+            "loading_pct": engine.get_loading_pct(),
+            "session_hours": engine.get_session_hours(),
+            "initial_loading_pct": engine.get_initial_loading_pct(),
+        },
+    )
 
     # Time sync
     timesync.sync_ntp()

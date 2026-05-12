@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -487,6 +488,7 @@ async def api_logs():
 BASE_DIR = "/home/bcmeter" if os.path.isdir("/home/bcmeter") else "/home/pi"
 _MAINT_LOG_DIR = os.path.join(BASE_DIR, "maintenance_logs")
 _SESSION_LOG_DIR = os.path.join(BASE_DIR, "logs")
+_OUTBOX_DIR = os.path.join(BASE_DIR, "outbox")
 _SECRET_CONFIG_KEYS = {
     "ap_password",
     "email_api_key",
@@ -495,6 +497,7 @@ _SECRET_CONFIG_KEYS = {
     "wifi_pwd",
     "wifi_password",
 }
+_EMAIL_IN_TEXT_RE = re.compile(r"[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[A-Za-z]{2,}")
 
 
 def _cmd_output(cmd: list, max_lines: int = 500) -> str:
@@ -538,6 +541,48 @@ def _redacted_json_file(path: str, errors: list[str]) -> str:
     except Exception as exc:
         errors.append(f"{os.path.basename(path)}: {exc}")
         return ""
+
+
+def _redact_debug_text(value) -> str:
+    return _EMAIL_IN_TEXT_RE.sub("[email]", str(value or ""))
+
+
+def _outbox_debug_summary(errors: list[str]) -> str:
+    """Return a redacted summary of pending/failed mail jobs."""
+    summary = {"pending": [], "sent_or_failed": []}
+
+    def read_jobs(directory: str, bucket: str, limit: int):
+        if not os.path.isdir(directory):
+            return
+        try:
+            names = [n for n in sorted(os.listdir(directory)) if n.endswith(".json")]
+        except Exception as exc:
+            errors.append(f"outbox {bucket}: {exc}")
+            return
+        for name in names[-limit:]:
+            path = os.path.join(directory, name)
+            try:
+                with open(path, "r") as fh:
+                    job = json.load(fh)
+                attachment = job.get("attachment") or ""
+                item = {
+                    "file": name,
+                    "payload": str(job.get("payload", "")),
+                    "created_at": job.get("created_at"),
+                    "attempts": int(job.get("attempts", 0) or 0),
+                    "next_retry_at": job.get("next_retry_at"),
+                    "last_error": _redact_debug_text(job.get("last_error", "")),
+                    "attachment": os.path.basename(attachment) if attachment else "",
+                    "attachment_exists": bool(attachment and os.path.exists(attachment)),
+                    "attachment_size": os.path.getsize(attachment) if attachment and os.path.exists(attachment) else 0,
+                }
+                summary[bucket].append(item)
+            except Exception as exc:
+                errors.append(f"outbox {name}: {exc}")
+
+    read_jobs(_OUTBOX_DIR, "pending", 25)
+    read_jobs(os.path.join(_OUTBOX_DIR, "sent"), "sent_or_failed", 25)
+    return json.dumps(summary, indent=2, sort_keys=True)
 
 
 @router.get("/maintenance-logs")
@@ -614,6 +659,12 @@ async def api_maintenance_logs():
                 included.append("incident_log.txt")
         except Exception:
             pass
+
+        # 8. Outbox state without message bodies or recipients.
+        outbox_summary = _outbox_debug_summary(errors)
+        if outbox_summary:
+            zf.writestr("mail_outbox.redacted.json", outbox_summary)
+            included.append("mail_outbox.redacted.json")
 
         manifest = {
             "created_at": datetime.now().isoformat(timespec="seconds"),

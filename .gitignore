@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+*.zip
+*.img
+.env
+.venv/
+venv/
+logs/
+maintenance_logs/
+qc-local-*/

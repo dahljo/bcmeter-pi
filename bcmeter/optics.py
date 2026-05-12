@@ -53,8 +53,22 @@ class Optics:
             pin = LED_PINS[ch]
             pi.set_mode(pin, 1)  # OUTPUT
             pi.set_PWM_range(pin, LED_PWM_RANGE)
-            pi.set_PWM_frequency(pin, LED_PWM_FREQ)
+            actual_freq = pi.set_PWM_frequency(pin, LED_PWM_FREQ)
             pi.set_PWM_dutycycle(pin, 0)
+            try:
+                real_range = int(pi.get_PWM_real_range(pin))
+            except Exception:
+                real_range = 0
+            if real_range > 0 and real_range < LED_PWM_RANGE:
+                logger.warning(
+                    "LED CH%d PWM quantized on GPIO%d: requested %d Hz range=%d, actual %d Hz real_range=%d",
+                    ch, pin, LED_PWM_FREQ, LED_PWM_RANGE, actual_freq, real_range,
+                )
+            else:
+                logger.info(
+                    "LED CH%d PWM on GPIO%d: requested %d Hz range=%d, actual %d Hz real_range=%d",
+                    ch, pin, LED_PWM_FREQ, LED_PWM_RANGE, actual_freq, real_range,
+                )
 
         logger.info("Optics initialized (3 LED channels)")
         return True

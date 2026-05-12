@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Notification system via AWS Lambda with outbox queue and retry.
 
 Sends all notifications as HTTP POST JSON to the bcMeter Lambda endpoint.
@@ -23,6 +25,7 @@ import uuid
 import zlib
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 logger = logging.getLogger("bcmeter.email")
 
@@ -52,6 +55,9 @@ _cooldowns: dict = {}  # {mail_type: last_sent_time}
 _session_start: float = 0.0
 _session_flags: set = set()
 _cooldown_lock = threading.Lock()
+_log_send_lock = threading.Lock()
+_remote_sent_offset: int = 0
+_last_session_filename: str = ""
 
 # Hardcoded cooldown intervals matching ESP32 email_handler.cpp
 _COOLDOWN_INTERVALS: dict[str, float] = {
@@ -72,6 +78,16 @@ _COOLDOWN_INTERVALS: dict[str, float] = {
 _sender_thread = None
 _sender_wakeup = None
 _sender_stop = None
+
+# Periodic loop mirrors ESP32 EmailHandler::loop(): measurement owns optical
+# timing; email/team upload scheduling lives here.
+_periodic_thread = None
+_periodic_stop_event = None
+_periodic_session_active_fn = None
+_periodic_measure_stats_fn = None
+_periodic_last_log_time = 0.0
+_periodic_last_team_time = 0.0
+_periodic_lock = threading.Lock()
 
 
 def is_valid_email_address(address: str) -> bool:
@@ -252,7 +268,7 @@ def set_session_flag(flag: str):
 
 def _snapshot_attachment(payload: str) -> str | None:
     """Copy current log to outbox for attachment."""
-    if payload not in ("Log", "Pump", "SignalNoise"):
+    if payload not in ("Pump", "SignalNoise"):
         return None
     src = os.path.join(_base_dir, "logs", "log_current.csv")
     if not os.path.exists(src) or os.path.getsize(src) < 500:
@@ -267,6 +283,90 @@ def _snapshot_attachment(payload: str) -> str | None:
         return dst
     except Exception:
         return None
+
+
+def reset_log_mail_offset():
+    """Reset incremental log-mail offset at session start."""
+    global _remote_sent_offset, _last_session_filename
+    with _log_send_lock:
+        _remote_sent_offset = 0
+        _last_session_filename = ""
+
+
+def _snapshot_current_log_incremental(max_bytes: int = 30000) -> tuple[str, str, int] | None:
+    """Snapshot header + rows not yet queued for log email delivery."""
+    global _last_session_filename
+
+    src = os.path.join(_base_dir, "logs", "log_current.csv")
+    if not os.path.exists(src):
+        return None
+
+    real = os.path.realpath(src)
+    filename = os.path.basename(real) if real else "log_current.csv"
+    try:
+        file_size = os.path.getsize(real)
+    except OSError:
+        return None
+    if file_size < 10:
+        return None
+
+    with _log_send_lock:
+        if filename != _last_session_filename:
+            _last_session_filename = filename
+            start_offset = 0
+        else:
+            start_offset = _remote_sent_offset
+
+        try:
+            with open(real, "rb") as fh:
+                header = fh.readline(4096)
+                if not header:
+                    return None
+                header_end = fh.tell()
+                if start_offset < header_end:
+                    start_offset = header_end
+                if start_offset >= file_size:
+                    return None
+
+                read_start = start_offset
+                available = file_size - read_start
+                if available > max_bytes:
+                    read_start = max(header_end, file_size - max_bytes)
+                    if read_start > header_end:
+                        fh.seek(read_start)
+                        fh.readline()
+                        read_start = fh.tell()
+                        if read_start >= file_size:
+                            return None
+
+                fh.seek(read_start)
+                body = fh.read(file_size - read_start)
+        except OSError:
+            return None
+
+        if not body.strip():
+            return None
+
+        _ensure_outbox_dirs()
+        ts = datetime.now().strftime("%y%m%d_%H%M%S")
+        hostname = socket.gethostname()
+        dst_name = f"{hostname}_Log_{ts}_{uuid.uuid4().hex[:8]}.csv"
+        dst = os.path.join(OUTBOX_ATTACH_DIR, dst_name)
+        try:
+            with open(dst, "wb") as out:
+                out.write(header)
+                out.write(body)
+        except OSError:
+            return None
+
+        return dst, filename, file_size
+
+
+def _commit_log_mail_offset(filename: str, offset: int):
+    global _remote_sent_offset, _last_session_filename
+    with _log_send_lock:
+        _last_session_filename = filename
+        _remote_sent_offset = max(_remote_sent_offset, int(offset))
 
 
 def _format_body(payload: str, data: dict = None) -> str:
@@ -418,9 +518,94 @@ def _post_json(url: str, api_key: str, device_id: str,
         return False, str(e)
 
 
+def _current_log_filename(default: str = "log_current.csv") -> str:
+    current = os.path.join(_base_dir, "logs", "log_current.csv")
+    try:
+        real = os.path.realpath(current)
+        if real and os.path.exists(real):
+            return os.path.basename(real)
+    except Exception:
+        pass
+    return default
+
+
+def _log_upload_payload(csv_bytes: bytes, filename: str, device_id: str,
+                        receivers: list[str], data: dict | None = None,
+                        modem_abbreviated: bool = False) -> dict:
+    compressed = zlib.compress(csv_bytes, 6)
+    payload = {
+        "recipients": receivers,
+        "device_id": device_id,
+        "filename": filename,
+        "content_b64": base64.b64encode(compressed).decode("ascii"),
+        "compressed": True,
+        "incremental": True,
+        "modem_abbreviated": bool(modem_abbreviated),
+        "local_ip": _device_ip(),
+    }
+    if data:
+        for key in (
+            "bc_session_avg",
+            "bc_hour_avg",
+            "bc_current",
+            "loading_pct",
+            "initial_loading_pct",
+            "session_hours",
+            "incidents",
+            "lat",
+            "lon",
+        ):
+            if key in data:
+                payload[key] = data[key]
+    try:
+        from bcmeter import __version__
+        payload["telemetry"] = {
+            "hostname": socket.gethostname(),
+            "bcmeter_version": __version__,
+        }
+    except Exception:
+        payload["telemetry"] = {"hostname": socket.gethostname()}
+    return payload
+
+
+def _send_log_attachment_over_ip(data: dict | None,
+                                 attachment_path: str | None) -> tuple[bool, str]:
+    cfg = _get_config()
+    api_key = _configured_api_key(cfg)
+    if not api_key:
+        return False, "No API key configured"
+
+    receivers = normalize_recipients(cfg.get("mail_logs_to", ""))
+    if not receivers:
+        return False, "No recipients configured"
+
+    if not attachment_path or not os.path.exists(attachment_path):
+        return False, "No current log attachment"
+
+    with open(attachment_path, "rb") as f:
+        csv_bytes = f.read()
+    if len(csv_bytes) < 10:
+        return False, "Current log attachment is empty"
+
+    device_id = cfg.get("device_name", f"bcMeter_{socket.gethostname()}")
+    filename = str((data or {}).get("filename") or "").strip()
+    if not filename:
+        filename = _current_log_filename(os.path.basename(attachment_path))
+    payload = _log_upload_payload(csv_bytes, filename, device_id, receivers, data)
+    ok, err = _post_json(_configured_lambda_url(cfg), api_key, device_id, payload)
+    if ok:
+        logger.info("Log email upload sent: %s", filename)
+    else:
+        logger.warning("Log email upload failed: %s", err)
+    return ok, err
+
+
 def _send_notification(payload: str, data: dict = None,
                        attachment_path: str = None) -> tuple[bool, str]:
     """Send notification to Lambda endpoint. Returns (success, error)."""
+    if payload == "Log":
+        return _send_log_attachment_over_ip(data, attachment_path)
+
     cfg = _get_config()
 
     api_key = _configured_api_key(cfg)
@@ -584,22 +769,6 @@ def init_sender():
     if _sender_thread is not None and _sender_thread.is_alive():
         return
     _ensure_outbox_dirs()
-    # Purge stale outbox jobs from previous sessions to avoid duplicate sends
-    try:
-        for name in os.listdir(OUTBOX_DIR):
-            if name.endswith(".json"):
-                path = os.path.join(OUTBOX_DIR, name)
-                try:
-                    with open(path) as f:
-                        job = json.load(f)
-                    att = job.get("attachment")
-                    if att and os.path.exists(att):
-                        os.remove(att)
-                except Exception:
-                    pass
-                os.remove(path)
-    except Exception:
-        pass
     _sender_wakeup = threading.Event()
     _sender_stop = threading.Event()
     _sender_thread = threading.Thread(target=_sender_worker_loop, daemon=True)
@@ -614,15 +783,153 @@ def stop_sender():
         _sender_wakeup.set()
 
 
+def reset_periodic_timers():
+    """Reset periodic log/team timers at the start of a measurement session."""
+    global _periodic_last_log_time, _periodic_last_team_time
+    now = time.time()
+    with _periodic_lock:
+        _periodic_last_log_time = now
+        _periodic_last_team_time = now
+
+
+def _periodic_session_active() -> bool:
+    try:
+        if _periodic_session_active_fn is not None:
+            return bool(_periodic_session_active_fn())
+    except Exception:
+        logger.debug("Periodic email session-active check failed", exc_info=True)
+        return False
+    try:
+        from bcmeter.state import state
+        return bool(state.get("sampling"))
+    except Exception:
+        return False
+
+
+def _periodic_measure_stats() -> dict:
+    if _periodic_measure_stats_fn is None:
+        return {}
+    try:
+        data = _periodic_measure_stats_fn() or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.debug("Periodic email measure stats failed", exc_info=True)
+        return {}
+
+
+def _periodic_worker_loop():
+    """ESP32-parity periodic email/team upload loop, outside measurement."""
+    global _periodic_last_log_time, _periodic_last_team_time
+    reset_periodic_timers()
+
+    while not _periodic_stop_event.is_set():
+        try:
+            if not _periodic_session_active():
+                _periodic_stop_event.wait(1.0)
+                continue
+
+            cfg = _get_config()
+            now = time.time()
+
+            if cfg.get("send_log_by_mail", False):
+                try:
+                    log_interval_s = max(60.0, float(cfg.get("mail_sending_interval", 24.0)) * 3600.0)
+                except Exception:
+                    log_interval_s = 24.0 * 3600.0
+                if now - _periodic_last_log_time > log_interval_s:
+                    try:
+                        logger.info("[Email] Log timer fired: elapsed=%.1fs interval=%.1fs",
+                                    now - _periodic_last_log_time, log_interval_s)
+                        stats = _periodic_measure_stats()
+                        ok = send_current_log(**stats)
+                        logger.info("[Email] Log send result: %s", "OK" if ok else "FAIL")
+                    except Exception:
+                        logger.exception("Periodic log email failed")
+                    _periodic_last_log_time = time.time()
+
+            if cfg.get("share_with_bcmeter", False):
+                try:
+                    team_interval_s = max(60.0, float(cfg.get("team_upload_interval", 1.0)) * 3600.0)
+                except Exception:
+                    team_interval_s = 3600.0
+                if now - _periodic_last_team_time > team_interval_s:
+                    try:
+                        send_team_log()
+                    except Exception:
+                        logger.exception("Team upload failed")
+                    _periodic_last_team_time = time.time()
+        except Exception:
+            logger.exception("Periodic email loop failed")
+
+        _periodic_stop_event.wait(1.0)
+
+
+def init_periodic_loop(
+    stop_event,
+    session_active_fn: Callable[[], bool] | None = None,
+    measure_stats_fn: Callable[[], dict] | None = None,
+):
+    """Start ESP32-parity periodic email/team upload loop."""
+    global _periodic_thread, _periodic_stop_event
+    global _periodic_session_active_fn, _periodic_measure_stats_fn
+
+    init_sender()
+    _periodic_session_active_fn = session_active_fn
+    _periodic_measure_stats_fn = measure_stats_fn
+    _periodic_stop_event = stop_event
+
+    if _periodic_thread is not None and _periodic_thread.is_alive():
+        return
+    _periodic_thread = threading.Thread(
+        target=_periodic_worker_loop,
+        daemon=True,
+        name="email_periodic",
+    )
+    _periodic_thread.start()
+
+
+def _enqueue_job(job: dict, replace_existing: bool = True) -> bool:
+    try:
+        _ensure_outbox_dirs()
+        if replace_existing:
+            for name in os.listdir(OUTBOX_DIR):
+                if not name.endswith(".json"):
+                    continue
+                old_path = os.path.join(OUTBOX_DIR, name)
+                try:
+                    with open(old_path) as f:
+                        old = json.load(f)
+                    if old.get("payload") == job.get("payload"):
+                        old_att = old.get("attachment")
+                        os.remove(old_path)
+                        if old_att and os.path.exists(old_att):
+                            os.remove(old_att)
+                except Exception:
+                    pass
+
+        name = f"{int(job['created_at'])}_{job['id']}.json"
+        _atomic_write_json(os.path.join(OUTBOX_DIR, name), job)
+        set_last_mail_time(str(job.get("payload", "")))
+        if _sender_wakeup:
+            _sender_wakeup.set()
+        return True
+    except Exception as e:
+        logger.error("Failed to enqueue notification: %s", e)
+        return False
+
+
 def send_email(payload: str, data: dict = None) -> bool:
     """Enqueue a notification for delivery. Returns True if enqueued."""
     init_sender()
     attachment = _snapshot_attachment(payload)
+    job_data = dict(data or {})
+    if payload == "Log" and attachment and not job_data.get("filename"):
+        job_data["filename"] = _current_log_filename(os.path.basename(attachment))
 
     job = {
         "id": uuid.uuid4().hex,
         "payload": payload,
-        "data": data or {},
+        "data": job_data,
         "attachment": attachment,
         "created_at": time.time(),
         "attempts": 0,
@@ -630,33 +937,7 @@ def send_email(payload: str, data: dict = None) -> bool:
         "last_error": "",
     }
 
-    try:
-        _ensure_outbox_dirs()
-        # Replace existing job of same type
-        for name in os.listdir(OUTBOX_DIR):
-            if not name.endswith(".json"):
-                continue
-            old_path = os.path.join(OUTBOX_DIR, name)
-            try:
-                with open(old_path) as f:
-                    old = json.load(f)
-                if old.get("payload") == payload:
-                    old_att = old.get("attachment")
-                    os.remove(old_path)
-                    if old_att and os.path.exists(old_att):
-                        os.remove(old_att)
-            except Exception:
-                pass
-
-        name = f"{int(job['created_at'])}_{job['id']}.json"
-        _atomic_write_json(os.path.join(OUTBOX_DIR, name), job)
-        set_last_mail_time(payload)
-        if _sender_wakeup:
-            _sender_wakeup.set()
-        return True
-    except Exception as e:
-        logger.error(f"Failed to enqueue notification: {e}")
-        return False
+    return _enqueue_job(job, replace_existing=(payload != "Log"))
 
 
 # ---------------------------------------------------------------------------
@@ -786,7 +1067,55 @@ def send_current_log(bc_session_avg: float = None, bc_hour_avg: float = None,
         data["session_hours"] = session_hours
     if initial_loading_pct is not None:
         data["initial_loading_pct"] = initial_loading_pct
-    send_email("Log", data if data else None)
+
+    try:
+        from bcmeter.state import state
+        snap = state.snapshot()
+        data["bc_current"] = snap.get("last_bc", 0.0)
+    except Exception:
+        pass
+
+    try:
+        from bcmeter import incident_log
+        data["incidents"] = json.loads(incident_log.to_json())
+    except Exception:
+        pass
+
+    try:
+        from bcmeter import geoloc
+        ok, lat, lon = geoloc.get_location()
+        if ok:
+            data["lat"] = lat
+            data["lon"] = lon
+    except Exception:
+        pass
+
+    init_sender()
+    snapshot = _snapshot_current_log_incremental()
+    if not snapshot:
+        logger.info("WiFi log email: no new data to send")
+        return False
+    attachment, filename, new_offset = snapshot
+    data["filename"] = filename
+    job = {
+        "id": uuid.uuid4().hex,
+        "payload": "Log",
+        "data": data,
+        "attachment": attachment,
+        "created_at": time.time(),
+        "attempts": 0,
+        "next_retry_at": 0,
+        "last_error": "",
+    }
+    if not _enqueue_job(job, replace_existing=False):
+        try:
+            os.remove(attachment)
+        except Exception:
+            pass
+        return False
+    _commit_log_mail_offset(filename, new_offset)
+    logger.info("WiFi log email queued: %s offset=%d", filename, new_offset)
+    return True
 
 
 # --- Team sharing: direct upload (no email) ---
@@ -963,8 +1292,12 @@ def send_wifi_connected(modem_available: bool = False,
 
 
 def send_session_start(session_file: str):
+    reset_team_offset()
+    reset_log_mail_offset()
+    reset_periodic_timers()
+
     cfg = _get_config()
-    flow_lpm = float(cfg.get("airflow_per_minute", 0.25))
+    flow_lpm = float(cfg.get("airflow_per_minute", 0.3))
     flow_ml = int(flow_lpm * 1000)
 
     # Log delivery info
@@ -1217,17 +1550,18 @@ def _send_log_over_ip(csv_data, fname, device_id, receivers):
     if not api_key:
         return False, "No API key configured"
     receivers = normalize_recipients(receivers)
+    if not receivers:
+        return False, "No recipients configured"
     csv_data = _abbreviate_csv_for_cellular(csv_data, cfg)
-    notification = {
-        "type": "notification",
-        "notification_type": "LogUpload",
-        "recipients": receivers,
-        "device_id": device_id,
-        "filename": fname,
-        "content": csv_data,
-        "modem_abbreviated": True,
-    }
-    return _post_json(_configured_lambda_url(cfg), api_key, device_id, notification)
+    payload = _log_upload_payload(
+        csv_data.encode("utf-8"),
+        fname,
+        device_id,
+        receivers,
+        data=None,
+        modem_abbreviated=True,
+    )
+    return _post_json(_configured_lambda_url(cfg), api_key, device_id, payload)
 
 
 def validate_api_key(api_key: str) -> tuple[bool, str]:
