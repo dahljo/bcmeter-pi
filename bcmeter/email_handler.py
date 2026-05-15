@@ -551,6 +551,8 @@ def _log_upload_payload(csv_bytes: bytes, filename: str, device_id: str,
             "loading_pct",
             "initial_loading_pct",
             "session_hours",
+            "current_atn",
+            "initial_atn",
             "incidents",
             "lat",
             "lon",
@@ -1055,7 +1057,8 @@ def send_temperature_alert(temp: float):
 
 def send_current_log(bc_session_avg: float = None, bc_hour_avg: float = None,
                       loading_pct: float = None, session_hours: float = None,
-                      initial_loading_pct: float = None):
+                      initial_loading_pct: float = None,
+                      current_atn: float = None, initial_atn: float = None):
     data = {}
     if bc_session_avg is not None:
         data["bc_session_avg"] = bc_session_avg
@@ -1067,6 +1070,10 @@ def send_current_log(bc_session_avg: float = None, bc_hour_avg: float = None,
         data["session_hours"] = session_hours
     if initial_loading_pct is not None:
         data["initial_loading_pct"] = initial_loading_pct
+    if current_atn is not None:
+        data["current_atn"] = current_atn
+    if initial_atn is not None:
+        data["initial_atn"] = initial_atn
 
     try:
         from bcmeter.state import state

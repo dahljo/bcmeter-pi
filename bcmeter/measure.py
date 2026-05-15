@@ -189,6 +189,8 @@ class MeasureEngine:
 
         # Session timing
         self._session_start_time = 0.0
+        self._initial_loading_pct = -1.0
+        self._initial_atn = -1.0
         self._zero_flow_cycles = 0
 
         # Indoor-sampling state (see measure.h for the mirrored ESP32 API).
@@ -221,6 +223,14 @@ class MeasureEngine:
     def get_initial_loading_pct(self) -> float:
         """Filter loading % captured at start of session (for delta rate calc)."""
         return self._initial_loading_pct if self._initial_loading_pct >= 0 else 0.0
+
+    def get_current_atn(self) -> float:
+        """Current 880 nm ATN."""
+        return self._last_atn[0]
+
+    def get_initial_atn(self) -> float:
+        """880 nm ATN captured at start of session."""
+        return self._initial_atn if self._initial_atn >= 0 else 0.0
 
     def get_session_hours(self) -> float:
         """Hours since current session started."""
@@ -452,6 +462,7 @@ class MeasureEngine:
         session_start_time = time.time()
         self._session_start_time = session_start_time
         self._initial_loading_pct = -1.0  # captured on first sample
+        self._initial_atn = -1.0
 
         # Resolve the session's indoor flag: config default, unless the
         # one-shot override is set. Consume the override so it only applies
@@ -1099,6 +1110,7 @@ class MeasureEngine:
         # Capture initial loading on first sample for delta-based rate calculation
         if self._initial_loading_pct < 0:
             self._initial_loading_pct = loading_pct
+            self._initial_atn = self._last_atn[0]
         if self._cfg.get_bool("filter_status_mail", False) and self._last_atn[0] > 100.0:
             interval = self._cfg.get_float("filter_mail_interval", 12.0) * 3600
             if email_handler.can_send_mail("Filter", interval):

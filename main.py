@@ -280,6 +280,8 @@ def main():
             "loading_pct": engine.get_loading_pct(),
             "session_hours": engine.get_session_hours(),
             "initial_loading_pct": engine.get_initial_loading_pct(),
+            "current_atn": engine.get_current_atn(),
+            "initial_atn": engine.get_initial_atn(),
         },
     )
 
