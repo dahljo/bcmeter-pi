@@ -347,6 +347,12 @@
         "type": "string",
         "parameter": "dev:system"
     },
+    "device_name_custom": {
+        "value": false,
+        "description": "Device name was explicitly set by the user",
+        "type": "boolean",
+        "parameter": "hidden"
+    },
     "email_api_key": {
         "value": "",
         "description": "Email service API key",

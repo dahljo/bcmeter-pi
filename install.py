@@ -1057,6 +1057,12 @@ def configure_device_identity(mode: str, is_update: bool = False):
 				cfg_data = json.load(f)
 			if "device_name" in cfg_data:
 				cfg_data["device_name"]["value"] = "bcMeter"
+				cfg_data["device_name_custom"] = {
+					"value": False,
+					"description": "Device name was explicitly set by the user",
+					"type": "boolean",
+					"parameter": "hidden",
+				}
 				with open(config_path, "w") as f:
 					json.dump(cfg_data, f, indent=4)
 				log("  Reset device_name to default (will derive from MAC on boot)")

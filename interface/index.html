@@ -3206,6 +3206,31 @@ return res;
 alert('Could not sync time within 5 seconds. Please check network/time and try again.');
 throw new Error('Time sync failed');
 }
+function startupCalibrationError(d){
+var log=String((d&&d.log)||'').trim().split('\n').filter(Boolean);
+return log.length?log[log.length-1]:'Auto-calibration failed';
+}
+function waitForStartupCalibration(timeoutMs){
+return new Promise(function(resolve,reject){
+var deadline=Date.now()+timeoutMs;
+var ci=setInterval(function(){
+fetch('/api/calibration',{cache:'no-store'}).then(function(r){
+if(!r.ok) throw new Error('HTTP '+r.status);
+return r.json();
+}).then(function(d){
+if(d.done){clearInterval(ci);if(!d.ok) reject(new Error(startupCalibrationError(d)));else resolve(d);return}
+if(Date.now()>deadline){clearInterval(ci);reject(new Error('Auto-calibration timed out'))}
+}).catch(function(e){clearInterval(ci);reject(e)});
+},1500);
+});
+}
+async function runStartupAutoCalibration(){
+var r=await fetch('/api/control?action=calibrate');
+if(!r.ok){var t=await r.text();throw new Error(t||('HTTP '+r.status))}
+await waitForStartupCalibration(30*60*1000);
+filterPeak=-1;
+addStep('Calibration complete');
+}
 function doStartSession(){
 clearAutoStart();
 warmupStartMs=null;
@@ -3236,19 +3261,7 @@ var indQs='&indoor='+(ind?'1':'0');
 return startWithSilentTimeSync(5000,indQs).then(async r=>{
 if(r.status===423){
 addStep('Device was never calibrated — running auto-calibration...');
-await fetch('/api/control?action=calibrate');
-await new Promise(resolve=>{
-var ci=setInterval(()=>{
-fetch('/api/calibration').then(r=>r.json()).then(d=>{
-if(d.done){clearInterval(ci);
-if(!d.ok) throw new Error('Auto-calibration failed');
-filterPeak=-1;
-addStep('Calibration complete');
-resolve();
-}
-});
-},1500);
-});
+await runStartupAutoCalibration();
 return fetch('/api/control?action=start&force=1'+indQs);
 }
 if(r.status===424){

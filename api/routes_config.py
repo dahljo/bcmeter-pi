@@ -172,7 +172,7 @@ async def api_device_rename(request: Request):
     if not isinstance(name, str) or not (1 <= len(name) <= 32):
         return PlainTextResponse("Name must be 1-32 chars", status_code=400)
 
-    _cfg.set_string("device_name", name)
+    _cfg.set_device_name(name, custom=True)
     _cfg.save()
 
     # Update system hostname (best effort)

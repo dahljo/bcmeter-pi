@@ -9,7 +9,6 @@ import os
 import logging
 import re
 import threading
-import socket
 
 logger = logging.getLogger("bcmeter.config")
 
@@ -118,6 +117,37 @@ REGISTRY = [
 
 _REGISTRY_MAP = {e.key: e for e in REGISTRY}
 _SECRET_PLACEHOLDERS = {"", "configured", "email_service_password", "your_api_key", "iot_api_key"}
+DEVICE_NAME_CUSTOM_KEY = "device_name_custom"
+_AUTO_DEVICE_NAME_RE = re.compile(r"^bcMeter-[0-9A-Fa-f]{4}$")
+
+
+def _hidden_entry(value, description=""):
+    return {
+        "value": value,
+        "description": description,
+        "type": T_BOOL if isinstance(value, bool) else T_STRING,
+        "parameter": "hidden",
+    }
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
+def _wifi_mac_suffix() -> str:
+    try:
+        with open("/sys/class/net/wlan0/address", "r") as f:
+            mac = f.read().strip()
+        octets = mac.split(":")
+        if len(octets) == 6:
+            return (octets[-2] + octets[-1]).upper()
+    except Exception:
+        pass
+    return ""
 
 
 def _is_real_secret(value) -> bool:
@@ -147,13 +177,19 @@ class CfgStore:
                 "type": entry.type,
                 "parameter": entry.group,
             }
+        self._data[DEVICE_NAME_CUSTOM_KEY] = _hidden_entry(
+            False, "Device name was explicitly set by the user"
+        )
 
         # Override with values from file
+        custom_marker_present = False
         if os.path.exists(self._path):
             try:
                 with open(self._path, "r") as f:
                     file_data = json.load(f)
                 for key, obj in file_data.items():
+                    if key == DEVICE_NAME_CUSTOM_KEY:
+                        custom_marker_present = True
                     if isinstance(obj, dict) and "value" in obj:
                         if key in self._data:
                             self._data[key]["value"] = obj["value"]
@@ -187,34 +223,39 @@ class CfgStore:
             self._data.pop("iot_api_key", None)
             migrated = True
 
-        # Derive device_name from WiFi MAC (last 2 bytes).
-        # Triggers when:
-        #   - device_name is the bare default "bcMeter" (fresh image)
-        #   - device_name follows the "bcMeter-XXXX" pattern but the
-        #     suffix doesn't match this hardware's MAC (card moved to
-        #     a different device)
-        # A user-chosen name like "My Lab Unit" is never touched.
-        current_name = self._data.get("device_name", {}).get("value", "bcMeter")
-        hw_suffix = ""
-        try:
-            with open("/sys/class/net/wlan0/address", "r") as f:
-                mac = f.read().strip()
-            octets = mac.split(":")
-            if len(octets) == 6:
-                hw_suffix = (octets[-2] + octets[-1]).upper()
-        except Exception:
-            pass
+        # Derive device_name from WiFi MAC (last 2 bytes) only while the
+        # device still uses automatic naming. Once a user renames the device,
+        # device_name_custom disables this boot-time auto rename permanently.
+        current_name = str(
+            self._data.get("device_name", {}).get("value", "bcMeter") or "bcMeter"
+        ).strip()
+        hw_suffix = _wifi_mac_suffix()
+        expected_auto_name = f"bcMeter-{hw_suffix}" if hw_suffix else ""
 
+        if not custom_marker_present:
+            # Migrate existing configs: a name that is neither the bare default
+            # nor this hardware's exact auto name is treated as intentional.
+            inferred_custom = (
+                current_name != "bcMeter" and current_name != expected_auto_name
+            )
+            self._data[DEVICE_NAME_CUSTOM_KEY]["value"] = inferred_custom
+            if inferred_custom:
+                migrated = True
+
+        device_name_custom = _truthy(
+            self._data.get(DEVICE_NAME_CUSTOM_KEY, {}).get("value", False)
+        )
         needs_rename = False
-        if current_name == "bcMeter":
-            needs_rename = True
-        elif hw_suffix and re.match(r"^bcMeter-[0-9A-Fa-f]{4}$", current_name):
-            # Auto-generated name from a different device's MAC
-            if current_name != f"bcMeter-{hw_suffix}":
+        if not device_name_custom:
+            if current_name == "bcMeter":
                 needs_rename = True
+            elif hw_suffix and _AUTO_DEVICE_NAME_RE.match(current_name):
+                # Auto-generated name from a different device's MAC.
+                needs_rename = current_name != expected_auto_name
 
         if needs_rename and hw_suffix:
-            self._data["device_name"]["value"] = f"bcMeter-{hw_suffix}"
+            self._data["device_name"]["value"] = expected_auto_name
+            migrated = True
 
         if migrated:
             self.save()
@@ -301,6 +342,10 @@ class CfgStore:
     def set_string(self, key: str, value: str):
         self.set(key, value)
 
+    def set_device_name(self, value: str, custom: bool = True):
+        self.set_string("device_name", str(value))
+        self.set_bool(DEVICE_NAME_CUSTOM_KEY, bool(custom))
+
     def to_json(self) -> str:
         """Return full config as JSON string (for /api/config GET)."""
         with self._lock:
@@ -322,9 +367,17 @@ class CfgStore:
             return False
 
         with self._lock:
+            incoming_device_name = None
+            device_name_seen = False
+            custom_marker_seen = False
             for key, val in incoming.items():
                 if isinstance(val, dict) and "value" in val:
                     val = val["value"]
+                if key == "device_name":
+                    incoming_device_name = val
+                    device_name_seen = True
+                elif key == DEVICE_NAME_CUSTOM_KEY:
+                    custom_marker_seen = True
                 if key in self._data:
                     self._data[key]["value"] = val
                 else:
@@ -344,6 +397,10 @@ class CfgStore:
                         "type": t,
                         "parameter": reg.group if reg else "hidden",
                     }
+            if device_name_seen and not custom_marker_seen:
+                self._data[DEVICE_NAME_CUSTOM_KEY]["value"] = (
+                    str(incoming_device_name or "").strip() != "bcMeter"
+                )
 
         self.save()
         return True
