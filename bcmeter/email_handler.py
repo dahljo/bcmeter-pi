@@ -1338,6 +1338,9 @@ def send_session_start(session_file: str):
 
 def send_ota_available(new_version: str, notes: str):
     """Notify user that a firmware update is available. Matches ESP32 sendOtaAvailable."""
+    if not has_email_configured():
+        logger.info("Firmware update email skipped: email is not configured")
+        return
     if not can_send_mail("FirmwareUpdate", _COOLDOWN_INTERVALS["FirmwareUpdate"]):
         return
     current = "unknown"
@@ -1359,6 +1362,9 @@ def send_ota_available(new_version: str, notes: str):
 
 def send_ota_success(old_version: str, new_version: str):
     """Notify user that firmware was updated successfully. Matches ESP32 sendOtaSuccess."""
+    if not has_email_configured():
+        logger.info("Firmware updated email skipped: email is not configured")
+        return
     cfg = _get_config()
     device_name = cfg.get("device_name", "bcMeter")
     send_email("FirmwareUpdated", {

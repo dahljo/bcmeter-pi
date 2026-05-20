@@ -56,6 +56,7 @@ _url = ""
 _sha256 = ""
 _apply_state = APPLY_IDLE
 _apply_progress = 0
+_apply_error = ""
 _force_check = False
 _checking = False
 _last_checked_at = 0.0
@@ -100,11 +101,17 @@ def _internet_available() -> bool:
         return False
 
 
-def _wait_for_stable_internet(stop_event: threading.Event) -> bool:
+def _wait_for_stable_internet(
+    stop_event: threading.Event,
+    timeout_s=None,
+) -> bool:
     """Block until internet is stable enough for the initial OTA check."""
     stable = 0
     last_log = 0.0
+    deadline = time.monotonic() + timeout_s if timeout_s is not None else None
     while not stop_event.is_set():
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
         if _internet_available():
             stable += 1
             if stable >= INTERNET_STABLE_SAMPLES:
@@ -120,7 +127,25 @@ def _wait_for_stable_internet(stop_event: threading.Event) -> bool:
     return False
 
 
-def _do_check() -> bool:
+def _set_apply_error(message: str):
+    """Set the OTA apply error and expose it through /api/ota/status."""
+    global _apply_state, _apply_error
+    with _lock:
+        _apply_error = message or "OTA apply failed"
+        _apply_state = APPLY_ERROR
+    incident_log.add("error", "OTA apply failed: %s", _apply_error)
+    logger.error("OTA apply failed: %s", _apply_error)
+
+
+def _set_available_flag():
+    """Mirror pending OTA status into shared status state."""
+    try:
+        state.set("ota_available", _available and not _skipped)
+    except Exception:
+        pass
+
+
+def _do_check(notify: bool = True) -> bool:
     """Fetch latest GitHub release and update state."""
     global _available, _skipped, _version, _notes, _url, _sha256
     global _checking, _last_checked_at, _last_error
@@ -160,9 +185,11 @@ def _do_check() -> bool:
                 _notes = notes_text[:511]
                 _url = tarball_url
                 _sha256 = ""  # GitHub releases don't include SHA256
+            _set_available_flag()
             incident_log.add("info", "Update available: %s -> %s", current, tag)
             logger.info("Update available: %s -> %s", current, tag)
-            email_handler.send_ota_available(tag.lstrip("v"), notes_text[:511])
+            if notify:
+                email_handler.send_ota_available(tag.lstrip("v"), notes_text[:511])
         else:
             with _lock:
                 _available = False
@@ -170,6 +197,7 @@ def _do_check() -> bool:
                 _notes = ""
                 _url = ""
                 _sha256 = ""
+            _set_available_flag()
             logger.info("Up to date (%s)", current)
         return True
 
@@ -188,9 +216,25 @@ def _apply():
     """Download release tarball, extract to CODE_DIR, restart service."""
     global _apply_state, _apply_progress
 
+    if not _internet_available():
+        stop = threading.Event()
+        if not _wait_for_stable_internet(stop, timeout_s=150):
+            _set_apply_error("Internet unavailable")
+            return
+
+    logger.info("Refreshing OTA metadata before apply")
+    if not _do_check(notify=False):
+        _set_apply_error("OTA metadata refresh failed")
+        return
+
     with _lock:
         url = _url
         expected_hash = _sha256
+        update_available = _available and not _skipped
+
+    if not update_available or not url:
+        _set_apply_error("No update available after refresh")
+        return
 
     logger.info("Downloading from %s", url)
 
@@ -226,10 +270,8 @@ def _apply():
         if expected_hash:
             computed = sha.hexdigest()
             if computed.lower() != expected_hash.lower():
-                logger.error("SHA256 mismatch! expected=%s computed=%s",
-                             expected_hash, computed)
-                with _lock:
-                    _apply_state = APPLY_ERROR
+                logger.error("SHA256 mismatch! expected=%s computed=%s", expected_hash, computed)
+                _set_apply_error("SHA256 mismatch")
                 return
             logger.info("SHA256 verified OK")
 
@@ -281,10 +323,8 @@ def _apply():
         )
 
     except Exception as e:
-        incident_log.add("error", "OTA apply failed: %s", e)
         logger.exception("OTA apply failed: %s", e)
-        with _lock:
-            _apply_state = APPLY_ERROR
+        _set_apply_error(str(e))
     finally:
         if tmp_path:
             try:
@@ -375,13 +415,16 @@ def get_info() -> dict:
     with _lock:
         return {
             "available": _available and not _skipped,
+            "skipped": _skipped,
             "version": _version,
             "notes": _notes,
+            "url": _url,
             "checking": _checking,
             "last_checked": _last_checked_at,
             "last_error": _last_error,
             "apply_state": _apply_state,
             "apply_progress": _apply_progress,
+            "apply_error": _apply_error,
         }
 
 
@@ -390,14 +433,21 @@ def skip():
     global _skipped
     with _lock:
         _skipped = True
+    _set_available_flag()
     logger.info("Update skipped for this boot")
 
 
 def start_apply() -> bool:
     """Begin download + extract. Returns False if nothing pending."""
+    global _apply_state, _apply_progress, _apply_error
     with _lock:
-        if not _available or _apply_state != APPLY_IDLE:
+        if not _available or _skipped:
             return False
+        if _apply_state in (APPLY_DOWNLOADING, APPLY_EXTRACTING):
+            return False
+        _apply_state = APPLY_IDLE
+        _apply_progress = 0
+        _apply_error = ""
 
     t = threading.Thread(target=_apply, daemon=True, name="ota_apply")
     t.start()
