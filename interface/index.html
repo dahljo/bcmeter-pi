@@ -518,6 +518,21 @@ Once connected, the captive window closes instantly. Right-click or long-tap <a 
 </div>
 </div>
 </div>
+<div class="modal" id="otaSuccessModal">
+<div class="modal-content mw-420">
+<div class="modal-header" style="background:#e8f5e9;border-bottom:1px solid #b7dfbf">
+<h5 style="color:#1f7a3a">Firmware Update Complete</h5>
+<button class="close" onclick="hideModal('otaSuccess')">&times;</button>
+</div>
+<div class="modal-body">
+<p style="margin-bottom:8px">bcMeter has updated successfully and resumed normal operation.</p>
+<p class="text-muted" style="font-size:13px;margin:0">Current version: <span id="otaSuccessVersion">--</span></p>
+</div>
+<div class="modal-footer">
+<button class="btn btn-success" onclick="hideModal('otaSuccess')">OK</button>
+</div>
+</div>
+</div>
 <div class="modal" id="adcWarningModal">
 <div class="modal-content mw-420">
 <div class="modal-header" style="background:#fff3cd;border-bottom:1px solid #ffc107">
@@ -966,6 +981,7 @@ lastDeviceStatus=d.status;
 if(d.status===0&&!chartData.length&&$('logs_select').value==='current') loadSessionList();
 deviceName=d.name||'bcMeter';
 if(d.version){var fv=$('fwVersion');if(fv)fv.textContent=d.version}
+checkOtaSuccessNotice(d);
 if(d.ota_available&&!otaAvailShown)checkOtaAvailable();
 if(d.env==='dev'){var db=$('devBanner');if(db)db.style.display=''}
 var dn=$('deviceName');var stDot=$('statusDot');var stTxt=$('statusText');
@@ -3502,6 +3518,23 @@ if(otaRebootTimer){clearInterval(otaRebootTimer);otaRebootTimer=null;}
 if(otaReachabilityTimer){clearInterval(otaReachabilityTimer);otaReachabilityTimer=null;}
 otaPollInFlight=false;
 }
+var OTA_PENDING_KEY='bcmeterOtaPendingVersion';
+function rememberOtaPending(version){
+try{localStorage.setItem(OTA_PENDING_KEY,(version&&String(version).trim())||'manual');}catch(e){}
+}
+function forgetOtaPending(){
+try{localStorage.removeItem(OTA_PENDING_KEY);}catch(e){}
+}
+function checkOtaSuccessNotice(d){
+var pending=null;
+try{pending=localStorage.getItem(OTA_PENDING_KEY);}catch(e){}
+var ver=d&&d.version?String(d.version):'';
+var matched=!!(pending&&(pending==='manual'||(ver&&ver.indexOf(pending)!==-1)));
+if(!(matched||(d&&d.ota_success===true)))return;
+forgetOtaPending();
+if($('otaSuccessVersion'))$('otaSuccessVersion').textContent=ver||pending||'--';
+showModal('otaSuccess');
+}
 function triggerOtaReload(){
 if(otaReloadTriggered) return;
 otaReloadTriggered=true;
@@ -3510,7 +3543,7 @@ if(otaWifiMode==='ap'){
 $('otaBar').style.width='100%';
 $('otaBar').style.background='#ffc107';
 $('otaBar').style.transition='none';
-$('otaStatus').innerHTML='<b>Reconnect to hotspot &ldquo;'+otaApSsid+'&rdquo;</b><br><span style="font-weight:normal">The device rebooted. Your device connected back to its previous network — reconnect to the bcMeter hotspot, then reload this page.</span>';
+$('otaStatus').innerHTML='<b>Reconnect to hotspot &ldquo;'+otaApSsid+'&rdquo;</b><br><span style="font-weight:normal">bcMeter restarted. Your device connected back to its previous network — reconnect to the bcMeter hotspot, then reload this page.</span>';
 $('otaBtn').style.display='none';
 $('otaReloadBtn').style.display='';
 } else {
@@ -3553,7 +3586,7 @@ var elapsed=Math.max(0, Date.now()-startMs);
 var pct=Math.min(100, (elapsed*100)/totalMs);
 var remSec=Math.max(0, Math.ceil((totalMs-elapsed)/1000));
 bar.style.width=pct+'%';
-status.textContent='Rebooting and reconnecting... '+remSec+'s';
+status.textContent='Restarting and reconnecting... '+remSec+'s';
 if(elapsed>=totalMs){
 triggerOtaReload();
 }
@@ -3565,6 +3598,7 @@ otaRebootTimer=setInterval(tick,200);
 }
 function resetOtaUiAfterError(msg){
 clearOtaTimers();
+forgetOtaPending();
 otaRebootStarted=false;
 otaReloadTriggered=false;
 otaSawOffline=false;
@@ -3583,10 +3617,11 @@ showModal('otaUpdate');
 function doOtaUpdate() {
 const fileInput=document.getElementById('otaFile');
 if(fileInput.files.length===0){alert('Please select a file');return;}
-if(!confirm('Install "'+fileInput.files[0].name+'" on the device?\nThe device will restart after the update.'))return;
+if(!confirm('Install "'+fileInput.files[0].name+'" on the device?\nbcMeter will restart after the update.'))return;
 const file=fileInput.files[0];
 const formData=new FormData();
 formData.append('file',file);
+rememberOtaPending('manual');
 otaRebootStarted=false;
 otaReloadTriggered=false;
 otaSawOffline=false;
@@ -3609,7 +3644,7 @@ $('otaStatus').textContent='Uploading: '+Math.round(pct)+'%';
 xhr.upload.onloadend=()=>{
 uploadFinished=true;
 $('otaBar').style.width='100%';
-$('otaStatus').textContent='Upload complete. Waiting for reboot...';
+$('otaStatus').textContent='Upload complete. Waiting for restart...';
 startOtaRebootCountdown();
 };
 xhr.onload=()=>{
@@ -3789,7 +3824,7 @@ var s=d.apply_state,p=d.apply_progress||0;
 if(s===1){$('otaAvailBar').style.width=Math.max(p,5)+'%';$('otaAvailApplyStatus').textContent='Downloading\u2026 '+p+'%';}
 else if(s===2){$('otaAvailBar').style.width='90%';$('otaAvailApplyStatus').textContent='Installing update\u2026';}
 else if(s===3){finishOtaAvailableApply();}
-else if(s===4){clearInterval(otaAvailPollTimer);otaAvailPollTimer=null;$('otaAvailApplyStatus').textContent=(d.apply_error||'Update failed')+'. Try the manual update option.';$('otaAvailSkipBtn').style.display='';}
+else if(s===4){forgetOtaPending();clearInterval(otaAvailPollTimer);otaAvailPollTimer=null;$('otaAvailApplyStatus').textContent=(d.apply_error||'Update failed')+'. Try the manual update option.';$('otaAvailSkipBtn').style.display='';}
 else{checkOtaInstalled(targetVersion,startedAt,d);}
 }).catch(function(){$('otaAvailApplyStatus').textContent='Restarting service...';});},1000);
 }
@@ -3797,6 +3832,7 @@ function applyOtaAvailable(){
 clearOtaAvailWatch();
 var targetVersion=($('otaAvailNewVer')&&$('otaAvailNewVer').textContent)||'';
 var startedAt=Date.now();
+rememberOtaPending(targetVersion);
 $('otaAvailSkipBtn').style.display='none';
 $('otaAvailApplyBtn').disabled=true;
 $('otaAvailApplyWrap').style.display='block';
@@ -3804,7 +3840,7 @@ $('otaAvailBar').style.width='5%';
 $('otaAvailApplyStatus').textContent='Starting download...';
 pollOtaAvailableApply(targetVersion,startedAt);
 fetch('/api/ota/apply',{method:'POST'}).then(function(r){
-if(!r.ok){$('otaAvailApplyStatus').textContent='Failed to start update. Try the manual update option.';}
+if(!r.ok){forgetOtaPending();$('otaAvailApplyStatus').textContent='Failed to start update. Try the manual update option.';}
 }).catch(function(){$('otaAvailApplyStatus').textContent='Restarting service...';});}
 window.onload=()=>{
 document.documentElement.style.setProperty('--vh', window.innerHeight*0.01+'px');

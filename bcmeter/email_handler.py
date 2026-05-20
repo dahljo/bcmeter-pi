@@ -1371,7 +1371,11 @@ def send_ota_success(old_version: str, new_version: str):
         "old_version": old_version,
         "new_version": new_version,
         "device_name": device_name,
-        "message": f"Firmware updated: {old_version} → {new_version}",
+        "message": (
+            f"bcMeter has restarted and resumed normal operation after "
+            f"updating from {old_version} to {new_version}. "
+            "No action is required."
+        ),
     })
 
 
