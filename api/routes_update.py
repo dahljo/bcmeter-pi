@@ -39,6 +39,14 @@ def set_dependencies(cfg, storage):
 # ---------------------------------------------------------------------------
 
 _CODE_DIR = "/home/bcmeter" if os.path.isdir("/home/bcmeter") else "/home/pi"
+_PRESERVE_RUNTIME_ITEMS = {
+    "bcMeter_config.json",
+    "bcMeter_wifi.json",
+    "logs",
+    "outbox",
+    "downloads",
+    ".upgrade_backup",
+}
 _SERVICE_NAME = "bcMeter.service"
 
 _update_lock = threading.Lock()
@@ -98,6 +106,9 @@ def _apply_update(archive_path: str, original_filename: str):
 
         # Copy files into the code directory
         for item in os.listdir(src_dir):
+            if item in _PRESERVE_RUNTIME_ITEMS or item.startswith(".upgrade_backup_"):
+                logger.info("Preserving runtime item during update: %s", item)
+                continue
             src = os.path.join(src_dir, item)
             dst = os.path.join(_CODE_DIR, item)
             if os.path.isdir(src):

@@ -47,6 +47,14 @@ INTERNET_SETTLE_S = 5
 CODE_DIR = "/home/bcmeter" if os.path.isdir("/home/bcmeter") else "/home/pi"
 SERVICE_NAME = "bcMeter.service"
 _OTA_VERSION_FILE = os.path.join(CODE_DIR, ".ota_last_version")
+_PRESERVE_RUNTIME_ITEMS = {
+    "bcMeter_config.json",
+    "bcMeter_wifi.json",
+    "logs",
+    "outbox",
+    "downloads",
+    ".upgrade_backup",
+}
 
 _available = False
 _skipped = False
@@ -296,6 +304,9 @@ def _apply():
 
         # Copy files into CODE_DIR
         for item in os.listdir(src_dir):
+            if item in _PRESERVE_RUNTIME_ITEMS or item.startswith(".upgrade_backup_"):
+                logger.info("Preserving runtime item during OTA: %s", item)
+                continue
             src = os.path.join(src_dir, item)
             dst = os.path.join(CODE_DIR, item)
             if os.path.isdir(src):
