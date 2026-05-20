@@ -3764,6 +3764,18 @@ if(Date.now()-startedAt>15000){$('otaAvailApplyStatus').textContent='Preparing u
 }).catch(function(){
 $('otaAvailApplyStatus').textContent='Restarting service...';
 });}
+function pollOtaAvailableApply(targetVersion,startedAt){
+if(otaAvailPollTimer){clearInterval(otaAvailPollTimer);}
+otaAvailPollTimer=setInterval(function(){
+fetch('/api/ota/status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+var s=d.apply_state,p=d.apply_progress||0;
+if(s===1){$('otaAvailBar').style.width=Math.max(p,5)+'%';$('otaAvailApplyStatus').textContent='Downloading\u2026 '+p+'%';}
+else if(s===2){$('otaAvailBar').style.width='90%';$('otaAvailApplyStatus').textContent='Installing update\u2026';}
+else if(s===3){finishOtaAvailableApply();}
+else if(s===4){clearInterval(otaAvailPollTimer);otaAvailPollTimer=null;$('otaAvailApplyStatus').textContent=(d.apply_error||'Update failed')+'. Try the manual update option.';$('otaAvailSkipBtn').style.display='';}
+else{checkOtaInstalled(targetVersion,startedAt,d);}
+}).catch(function(){$('otaAvailApplyStatus').textContent='Restarting service...';});},1000);
+}
 function applyOtaAvailable(){
 clearOtaAvailWatch();
 var targetVersion=($('otaAvailNewVer')&&$('otaAvailNewVer').textContent)||'';
@@ -3773,18 +3785,10 @@ $('otaAvailApplyBtn').disabled=true;
 $('otaAvailApplyWrap').style.display='block';
 $('otaAvailBar').style.width='5%';
 $('otaAvailApplyStatus').textContent='Starting download...';
+pollOtaAvailableApply(targetVersion,startedAt);
 fetch('/api/ota/apply',{method:'POST'}).then(function(r){
-if(!r.ok){$('otaAvailApplyStatus').textContent='Failed to start update. Try the manual update option.';return;}
-otaAvailPollTimer=setInterval(function(){
-fetch('/api/ota/status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
-var s=d.apply_state,p=d.apply_progress||0;
-if(s===1){$('otaAvailBar').style.width=Math.max(p,5)+'%';$('otaAvailApplyStatus').textContent='Downloading\u2026 '+p+'%';}
-else if(s===2){$('otaAvailBar').style.width='90%';$('otaAvailApplyStatus').textContent='Installing update\u2026';}
-else if(s===3){finishOtaAvailableApply();}
-else if(s===4){clearInterval(otaAvailPollTimer);otaAvailPollTimer=null;$('otaAvailApplyStatus').textContent=(d.apply_error||'Update failed')+'. Try the manual update option.';$('otaAvailSkipBtn').style.display='';}
-else{checkOtaInstalled(targetVersion,startedAt,d);}
-}).catch(function(){$('otaAvailApplyStatus').textContent='Restarting service...';});},1500);
-}).catch(function(){$('otaAvailApplyStatus').textContent='Connection error.';});}
+if(!r.ok){$('otaAvailApplyStatus').textContent='Failed to start update. Try the manual update option.';}
+}).catch(function(){$('otaAvailApplyStatus').textContent='Restarting service...';});}
 window.onload=()=>{
 document.documentElement.style.setProperty('--vh', window.innerHeight*0.01+'px');
 patchDownloadLinks();syncTime();initChart();fetchStatus();checkOnboarding();loadSessionList();setInterval(fetchStatus,5000);setInterval(fetchCSV,10000);setInterval(loadSessionList,30000);setTimeout(startOtaAvailableWatch,3000);

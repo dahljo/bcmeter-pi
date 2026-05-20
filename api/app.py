@@ -57,7 +57,10 @@ async def index():
     index_path = os.path.join(INTERFACE_DIR, "index.html")
     if os.path.exists(index_path):
         with open(index_path) as f:
-            return HTMLResponse(content=f.read())
+            return HTMLResponse(
+                content=f.read(),
+                headers={"Cache-Control": "no-store, max-age=0"},
+            )
     return HTMLResponse(content="<h1>bcMeter</h1><p>Frontend not installed.</p>")
 
 
