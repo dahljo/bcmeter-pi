@@ -433,21 +433,16 @@ Once connected, the captive window closes instantly. Right-click or long-tap <a 
 </div>
 <div class="modal" id="startupModal">
 <div class="modal-content mw-480">
-<div class="modal-header"><h5 id="startupTitle">Start Measurement</h5><button class="close" onclick="hideModal('startup')">&times;</button></div>
+<div class="modal-header"><h5 id="startupTitle">New Session</h5><button class="close" onclick="hideModal('startup')">&times;</button></div>
 <div class="modal-body">
 <div id="startupConfirm">
 <p id="startupPrompt" class="mb-3">Start a new measurement session?</p>
-<div id="mobileSamplingRow" style="display:none;margin:8px 0 12px 0;text-align:center">
-<label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:.9rem">
-<input type="checkbox" id="mobileSamplingCheck">
-<span>Mobile measurement <small class="text-muted">(GPS coordinates per sample)</small></span>
-</label>
+<div id="samplingModeRow" style="margin:10px 0 14px 0;display:flex;justify-content:center">
+<div class="seg-ctrl" id="samplingModeCtrl" onclick="onSamplingModeClick(event)">
+<button type="button" data-mode="outdoor" class="active">Outdoor</button>
+<button type="button" data-mode="mobile" id="samplingModeMobileBtn" style="display:none">Mobile</button>
+<button type="button" data-mode="indoor">Indoor</button>
 </div>
-<div id="indoorSamplingRow" style="margin:8px 0 12px 0;text-align:center">
-<label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:.9rem">
-<input type="checkbox" id="indoorSamplingCheck">
-<span>Indoor sampling <small class="text-muted">(marks this session as indoor — excluded from the public map)</small></span>
-</label>
 </div>
 <div class="d-flex justify-content-center" style="gap:8px">
 <button class="btn btn-success" id="startupConfirmBtn" onclick="doStartSession()">Start</button>
@@ -3182,6 +3177,9 @@ var systemCheckPollTimer=null;
 var initStepLabels={0:'Idle',1:'Preflight check',2:'Warming up CH0 (880nm)',3:'Warming up CH1 (520nm)',4:'Warming up CH2 (370nm)',5:'First measurement (settling)',10:'Sampling active'};
 var initStepPct={0:0,1:10,2:30,3:50,4:70,5:85,10:100};
 var _autoStartTimer=null,_autoStartInterval=null;
+function getSamplingMode(){var a=$('samplingModeCtrl')&&$('samplingModeCtrl').querySelector('button.active');return a?a.dataset.mode:'outdoor';}
+function setSamplingMode(mode){var c=$('samplingModeCtrl');if(!c)return;c.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.dataset.mode===mode);});}
+function onSamplingModeClick(e){var b=e.target.closest('button[data-mode]');if(!b||b.style.display==='none')return;setSamplingMode(b.dataset.mode);}
 function clearAutoStart(){if(_autoStartTimer){clearTimeout(_autoStartTimer);_autoStartTimer=null;}if(_autoStartInterval){clearInterval(_autoStartInterval);_autoStartInterval=null;}var w=$('autostartWrap');if(w)w.style.display='none';}
 function startAutoStartTimer(){clearAutoStart();var dur=8000,start=Date.now();var w=$('autostartWrap'),bar=$('autostartBar'),lbl=$('autostartLabel');if(!w||!bar||!lbl)return;w.style.display='';bar.style.width='0';lbl.textContent='Auto-start in 8s';_autoStartInterval=setInterval(function(){var el=Date.now()-start,pct=Math.min(100,el/dur*100),rem=Math.max(0,Math.ceil((dur-el)/1000));bar.style.width=pct+'%';lbl.textContent='Auto-start in '+rem+'s';},100);_autoStartTimer=setTimeout(function(){clearAutoStart();doStartSession();},dur);}
 function showStartupModal(){
@@ -3197,27 +3195,20 @@ if(ws<300) warnHtml='<div class="warm-warn">&#9888; Warmup &lt;5 min — first s
 var totalMin=Math.round((ws+st)/60);
 var noteHtml='<div style="font-size:.85rem;color:#6c757d;margin-top:8px">First sample in ~'+totalMin+' min ('+Math.round(ws/60)+' min warmup + '+Math.round(st/60)+' min sample).</div>'+warnHtml;
 if(d.status===2||d.status===1){
-$('startupPrompt').innerHTML='A session is currently running. Stop it and start a new one?'+noteHtml;
+$('startupTitle').textContent='Restart Session';
+$('startupPrompt').innerHTML=noteHtml;
 $('startupConfirmBtn').textContent='Restart';
 $('startupConfirmBtn').className='btn btn-warning';
 } else {
-$('startupPrompt').innerHTML='Start a new measurement session?'+noteHtml;
+$('startupTitle').textContent='New Session';
+$('startupPrompt').innerHTML=noteHtml;
 $('startupConfirmBtn').textContent='Start';
 $('startupConfirmBtn').className='btn btn-success';
 }
-if(d.gps){
-$('mobileSamplingRow').style.display='';
-var mob=cfgData['mobile_sampling']!=null?!!cfgData['mobile_sampling'].value:false;
-$('mobileSamplingCheck').checked=mob;
-}else{
-$('mobileSamplingRow').style.display='none';
-$('mobileSamplingCheck').checked=false;
-}
-// Indoor checkbox is always visible. Default reflects the persistent
-// `outdoor_measurement` toggle — if the user disabled outdoor mode
-// in Settings, the modal pre-ticks indoor.
-var outd=cfgData['outdoor_measurement']!=null?!!cfgData['outdoor_measurement'].value:true;
-$('indoorSamplingCheck').checked=!outd;
+$('samplingModeMobileBtn').style.display=d.gps?'':'none';
+var initialMode='outdoor';
+if(cfgData['mobile_sampling']!=null&&!!cfgData['mobile_sampling'].value&&d.gps) initialMode='mobile';
+setSamplingMode(initialMode);
 startAutoStartTimer();
 });
 }
@@ -3284,13 +3275,12 @@ addStep('Clearing state...');
 return fetch('/api/control?action=clear_error');
 });
 chain=chain.then(()=>{
-var mob=$('mobileSamplingCheck')&&$('mobileSamplingCheck').checked;
-return fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mobile_sampling:mob})});
+var mode=getSamplingMode();
+return fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mobile_sampling:mode==='mobile'})});
 });
 chain=chain.then(()=>{
 addStep('Starting session...');
-var ind=$('indoorSamplingCheck')&&$('indoorSamplingCheck').checked;
-var indQs='&indoor='+(ind?'1':'0');
+var indQs='&indoor='+(getSamplingMode()==='indoor'?'1':'0');
 return startWithSilentTimeSync(5000,indQs).then(async r=>{
 if(r.status===423){
 addStep('Device was never calibrated — running auto-calibration...');
