@@ -69,6 +69,9 @@ _force_check = False
 _checking = False
 _last_checked_at = 0.0
 _last_error = ""
+_success_old_version = ""
+_success_new_version = ""
+_success_at = 0.0
 _lock = threading.Lock()
 
 
@@ -393,6 +396,11 @@ def _check_ota_success():
         pass
 
     if prev and prev != current:
+        global _success_old_version, _success_new_version, _success_at
+        with _lock:
+            _success_old_version = prev
+            _success_new_version = current
+            _success_at = time.time()
         logger.info("OTA success detected: %s -> %s", prev, current)
         incident_log.add("ok", "Firmware updated: %s -> %s", prev, current)
         email_handler.send_ota_success(prev, current)
@@ -424,6 +432,7 @@ def request_check():
 def get_info() -> dict:
     """Return OTA status dict matching ESP32 /api/ota/status contract."""
     with _lock:
+        success_visible = bool(_success_at and (time.time() - _success_at) < 120)
         return {
             "available": _available and not _skipped,
             "skipped": _skipped,
@@ -436,6 +445,9 @@ def get_info() -> dict:
             "apply_state": _apply_state,
             "apply_progress": _apply_progress,
             "apply_error": _apply_error,
+            "ota_success": success_visible,
+            "ota_old_version": _success_old_version if success_visible else "",
+            "ota_new_version": _success_new_version if success_visible else "",
         }
 
 

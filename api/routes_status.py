@@ -179,9 +179,11 @@ async def api_status():
         ota = ota_check.get_info()
         data["ota_available"] = ota.get("available", False)
         data["ota_version"] = ota.get("version", "")
+        data["ota_success"] = ota.get("ota_success", False)
     except Exception:
         data["ota_available"] = False
         data["ota_version"] = ""
+        data["ota_success"] = False
 
     return JSONResponse(content=data)
 

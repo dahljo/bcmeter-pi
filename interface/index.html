@@ -3519,6 +3519,7 @@ if(otaReachabilityTimer){clearInterval(otaReachabilityTimer);otaReachabilityTime
 otaPollInFlight=false;
 }
 var OTA_PENDING_KEY='bcmeterOtaPendingVersion';
+var OTA_SUCCESS_SEEN_KEY='bcmeterOtaSuccessSeenVersion';
 function rememberOtaPending(version){
 try{localStorage.setItem(OTA_PENDING_KEY,(version&&String(version).trim())||'manual');}catch(e){}
 }
@@ -3531,7 +3532,10 @@ try{pending=localStorage.getItem(OTA_PENDING_KEY);}catch(e){}
 var ver=d&&d.version?String(d.version):'';
 var matched=!!(pending&&(pending==='manual'||(ver&&ver.indexOf(pending)!==-1)));
 if(!(matched||(d&&d.ota_success===true)))return;
+var successKey=ver||pending||'manual';
+try{if(!matched&&localStorage.getItem(OTA_SUCCESS_SEEN_KEY)===successKey)return;}catch(e){}
 forgetOtaPending();
+try{localStorage.setItem(OTA_SUCCESS_SEEN_KEY,successKey);}catch(e){}
 if($('otaSuccessVersion'))$('otaSuccessVersion').textContent=ver||pending||'--';
 showModal('otaSuccess');
 }
