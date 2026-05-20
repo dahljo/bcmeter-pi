@@ -2283,6 +2283,8 @@ plottable.forEach(function(c){
 var o1=document.createElement('option');o1.value=c;o1.textContent=niceLabel(c);m1.appendChild(o1);
 var o2=document.createElement('option');o2.value=c;o2.textContent=niceLabel(c);m2.appendChild(o2);
 });
+if(y1Key&&plottable.indexOf(y1Key)<0)y1Key='';
+if(y2Key&&plottable.indexOf(y2Key)<0)y2Key='';
 if(!y1Key&&plottable.length){
 var bcCol=plottable.find(function(c){return c.match(/^BC(ng|ug)m3_[0-9]/)&&!c.match(/unfiltered/)});
 y1Key=bcCol||plottable[0];
