@@ -2371,6 +2371,21 @@ combineAllBusy=false;
 combineAllLoaded=true;
 }).catch(function(){onFetchFail('csv');combineAllBusy=false;if(progWrap)progWrap.style.display='none';if(stTxt) stTxt.textContent='Failed to load sessions';if(stDot) stDot.className='status-dot red';});
 }
+function logSortValue(f){
+var m=((f&&f.name)||'').match(/^(\d{2})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})\.csv$/);
+if(m)return Date.UTC(2000+parseInt(m[3],10),parseInt(m[2],10)-1,parseInt(m[1],10),parseInt(m[4],10),parseInt(m[5],10),parseInt(m[6],10));
+if(f&&f.date){var t=Date.parse(String(f.date).replace(' ','T'));if(!isNaN(t))return t;}
+return -Infinity;
+}
+function latestLogName(files){
+if(!files.length)return '';
+var best=files[0],bestScore=logSortValue(best);
+files.slice(1).forEach(function(f){
+var s=logSortValue(f);
+if(s>bestScore){best=f;bestScore=s;}
+});
+return best.name;
+}
 function loadSessionList(){
 fetch('/api/files').then(r=>r.json()).then(files=>{
 var sel=$('logs_select');
@@ -2388,7 +2403,7 @@ sel.appendChild(o);
 });
 if(cur&&cur!=='current'&&sel.querySelector('option[value="'+CSS.escape(cur)+'"]')){sel.value=cur;}
 else if(lastDeviceStatus===0&&!chartData.length&&valid.length>0){
-sel.value=valid[valid.length-1].name;
+sel.value=latestLogName(valid);
 updateSessionLabels();fetchCSV();
 }
 }).catch(function(){});
