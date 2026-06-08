@@ -1,6 +1,6 @@
-# bcMeter Pi
+# bcMeter (DIY) — Raspberry Pi
 
-Redesigned Raspberry Pi Python codebase for the [bcMeter](https://bcmeter.org) — a portable black carbon measurement device for citizen science and air quality monitoring.
+Raspberry Pi Python codebase for bcMeter (DIY), the source-available, portable black carbon measurement device for citizen science and air quality monitoring. Freely available for private, educational and research use (CC BY-NC 4.0). See [bcmeter.org](https://bcmeter.org).
 
 This repository replaces the legacy Raspberry Pi codebase with a redesign focused on maintainability, reliability, and a clearer installation and update workflow. The legacy Raspberry Pi repository remains available at [dahljo/bcmeter](https://github.com/dahljo/bcmeter).
 
@@ -45,5 +45,5 @@ sudo bash install.sh
 
 ## License
 
-Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0).
+Source-available under the Creative Commons Attribution-NonCommercial 4.0 International license (CC BY-NC 4.0). Freely available for private, educational and research use; this is not an OSI-approved open-source license.
 For commercial licensing, visit [bcmeter.org](https://bcmeter.org).
