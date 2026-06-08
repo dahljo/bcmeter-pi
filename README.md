@@ -45,5 +45,5 @@ sudo bash install.sh
 
 ## License
 
-Source-available under the Creative Commons Attribution-NonCommercial 4.0 International license (CC BY-NC 4.0). Freely available for private, educational and research use; this is not an OSI-approved open-source license.
+Source-available under the Creative Commons Attribution-NonCommercial 4.0 International license (CC BY-NC 4.0). Freely available for private, educational and research use.
 For commercial licensing, visit [bcmeter.org](https://bcmeter.org).
