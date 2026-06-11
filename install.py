@@ -70,6 +70,11 @@ SLIM_PURGE_PACKAGES = [
 	"gdb",
 ]
 
+BOOT_KERNEL_PACKAGE_RE = re.compile(
+	r"^(linux-(base|image|headers)(-|$)|raspi-firmware$|"
+	r"raspberrypi-kernel$|raspberrypi-bootloader$)"
+)
+
 OLD_VENV_PACKAGES = [
 	"adafruit-blinka",
 	"adafruit-circuitpython-sht4x",
@@ -563,6 +568,45 @@ def slim_purge_unused():
 		run_cmd(f"rm -rf {d}/*", shell=True, ignore_error=True)
 
 
+def hold_boot_kernel_packages():
+	"""Prevent app installs from desynchronising Pi boot files and modules.
+
+	Raspberry Pi images boot kernel*.img from the FAT /boot/firmware partition,
+	while Debian linux-image package upgrades install modules under /lib/modules
+	and vmlinuz files under /boot. If an unattended apt upgrade happens while
+	the boot partition is not updated in lockstep, WiFi modules such as brcmfmac
+	disappear for the booted kernel and wlan0 never appears.
+	"""
+	if os.environ.get("BCMETER_ALLOW_KERNEL_UPGRADE") == "1":
+		log("Kernel/boot package hold disabled by BCMETER_ALLOW_KERNEL_UPGRADE=1")
+		return
+
+	result = subprocess.run(
+		["dpkg-query", "-W", "-f=${binary:Package}\t${db:Status-Abbrev}\n"],
+		capture_output=True, text=True
+	)
+	if result.returncode != 0:
+		log("WARNING: could not query installed kernel packages for apt hold")
+		return
+
+	packages = []
+	for line in result.stdout.splitlines():
+		parts = line.split()
+		if len(parts) < 2 or not parts[1].startswith("ii"):
+			continue
+		name = parts[0].split(":", 1)[0]
+		if BOOT_KERNEL_PACKAGE_RE.match(name):
+			packages.append(parts[0])
+
+	if not packages:
+		return
+
+	log("Holding Pi kernel/boot packages to keep bootfs and /lib/modules in sync")
+	packages = sorted(set(packages))
+	run_cmd(["apt-mark", "manual"] + packages, ignore_error=True)
+	run_cmd(["apt-mark", "hold"] + packages, ignore_error=True)
+
+
 def system_setup(mode: str, noupgrade=False, is_update=False):
 	# Keep existing conffiles without interactive prompts
 	dpkg_opts = ["-o", 'Dpkg::Options::=--force-confold']
@@ -570,6 +614,7 @@ def system_setup(mode: str, noupgrade=False, is_update=False):
 	# Slim config first — must precede any apt install so future packages
 	# respect the path-excludes and skip recommends/suggests.
 	configure_slim_apt()
+	hold_boot_kernel_packages()
 
 	if not is_update:
 		# Only needed on fresh / v1 installs — a working V2 system is healthy

@@ -329,7 +329,8 @@ class NetworkManager:
     def start_ap(self):
         """Start the bcMeter hotspot. Return True on success."""
         logger.info("Starting Access Point...")
-        self._ensure_nm_ready()
+        if not self._ensure_nm_ready():
+            return False
 
         ap_ssid = (
             self._cfg.get("device_name") or socket.gethostname() or "bcMeter"
@@ -374,7 +375,10 @@ class NetworkManager:
             return False
 
         time.sleep(1)
-        rc, _, err = _nmcli(["-w", "30", "con", "up", AP_CON_NAME], timeout=40)
+        rc, _, err = _nmcli(
+            ["-w", "30", "con", "up", "id", AP_CON_NAME, "ifname", WLAN_IFACE],
+            timeout=40,
+        )
         if rc != 0:
             logger.error("Failed to activate AP: %s", err)
             return False
@@ -923,6 +927,15 @@ class NetworkManager:
                 "NM not confirmed running (rc=%d) out=%s err=%s", rc, out, err
             )
 
+        _nmcli(["radio", "wifi", "on"], timeout=10)
+
+        if not self._wait_for_wifi_device():
+            logger.error(
+                "%s is unavailable; check Raspberry Pi kernel/modules and brcmfmac",
+                WLAN_IFACE,
+            )
+            return False
+
         # Ensure wlan0 is managed
         rc, out, _ = _nmcli(
             ["-g", "GENERAL.STATE", "dev", "show", WLAN_IFACE], timeout=10
@@ -931,7 +944,7 @@ class NetworkManager:
             _nmcli(["dev", "set", WLAN_IFACE, "managed", "yes"], timeout=10)
             time.sleep(1)
 
-        _nmcli(["radio", "wifi", "on"], timeout=10)
+        return True
 
     def _ensure_sta_profile(self, ssid, pwd):
         """Create (or recreate) the STA connection profile. Return True on success."""
@@ -982,7 +995,8 @@ class NetworkManager:
         self._con_down_all_wifi()
         time.sleep(1)
         rc, out, err = _nmcli(
-            ["-w", str(timeout), "con", "up", name], timeout=timeout + 10
+            ["-w", str(timeout), "con", "up", "id", name, "ifname", WLAN_IFACE],
+            timeout=timeout + 10,
         )
         if rc != 0:
             self._last_sta_error = err or out
@@ -1164,13 +1178,32 @@ class NetworkManager:
         except Exception:
             return False
 
+    def _wait_for_wifi_device(self, timeout=20):
+        deadline = time.time() + timeout
+        last_error = ""
+        while time.time() < deadline:
+            if self._is_wifi_driver_loaded():
+                return True
+            rc, _, err = _sh(["sudo", "modprobe", "brcmfmac"], timeout=10)
+            if rc != 0:
+                last_error = err
+            time.sleep(2)
+        if last_error:
+            logger.error("Failed to load WiFi driver brcmfmac: %s", last_error)
+        return False
+
     def _reload_wifi_driver(self):
         logger.debug("Reloading WiFi driver (brcmfmac)")
         try:
             self._con_down_all_wifi()
-            _sh(["sudo", "modprobe", "-r", "brcmfmac"], timeout=10)
+            rc, _, err = _sh(["sudo", "modprobe", "-r", "brcmfmac"], timeout=10)
+            if rc != 0 and err:
+                logger.debug("Ignoring brcmfmac unload failure: %s", err)
             time.sleep(3)
-            _sh(["sudo", "modprobe", "brcmfmac"], timeout=10)
+            rc, _, err = _sh(["sudo", "modprobe", "brcmfmac"], timeout=10)
+            if rc != 0:
+                logger.error("Failed to load WiFi driver brcmfmac: %s", err)
+                return False
             time.sleep(5)
             _nmcli(["dev", "set", WLAN_IFACE, "managed", "yes"], timeout=10)
             return self._is_wifi_driver_loaded()
