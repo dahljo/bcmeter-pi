@@ -69,6 +69,8 @@ def _run_calibration():
         _cal_end_ms = 0
         _cal_log.clear()
         _cal_log.append("[Cal] Web calibration started\n")
+    if _state is not None:
+        _state.set("calibration_running", True)
 
     try:
         ok = _engine.calibrate(log_fn=_cal_log_fn)
@@ -82,6 +84,8 @@ def _run_calibration():
         _cal_done = True
         _cal_end_ms = int(time.monotonic() * 1000)
         _cal_running = False
+    if _state is not None:
+        _state.set("calibration_running", False)
 
 
 def get_calibration_state() -> dict:

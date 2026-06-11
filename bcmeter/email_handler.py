@@ -72,6 +72,7 @@ _COOLDOWN_INTERVALS: dict[str, float] = {
     "FlowRecovery": 30 * 60,     # 30 minutes
     "FlowBump":     60 * 60,     # 1 hour
     "Error":        30 * 60,     # 30 minutes
+    "ReferenceDrop": 30 * 60,    # 30 minutes
 }
 
 # Sender worker
@@ -533,6 +534,8 @@ def _log_upload_payload(csv_bytes: bytes, filename: str, device_id: str,
                         receivers: list[str], data: dict | None = None,
                         modem_abbreviated: bool = False) -> dict:
     compressed = zlib.compress(csv_bytes, 6)
+    version = _device_version()
+    ssid = _device_ssid()
     payload = {
         "recipients": receivers,
         "device_id": device_id,
@@ -542,6 +545,9 @@ def _log_upload_payload(csv_bytes: bytes, filename: str, device_id: str,
         "incremental": True,
         "modem_abbreviated": bool(modem_abbreviated),
         "local_ip": _device_ip(),
+        "version": version,
+        "firmware": version,
+        "wifi_ssid": ssid,
     }
     if data:
         for key in (
@@ -559,14 +565,11 @@ def _log_upload_payload(csv_bytes: bytes, filename: str, device_id: str,
         ):
             if key in data:
                 payload[key] = data[key]
-    try:
-        from bcmeter import __version__
-        payload["telemetry"] = {
-            "hostname": socket.gethostname(),
-            "bcmeter_version": __version__,
-        }
-    except Exception:
-        payload["telemetry"] = {"hostname": socket.gethostname()}
+    payload["telemetry"] = {
+        "hostname": socket.gethostname(),
+        "bcmeter_version": version,
+        "wifi_ssid": ssid,
+    }
     return payload
 
 
@@ -633,6 +636,8 @@ def _send_notification(payload: str, data: dict = None,
 
     # Build notification JSON matching ESP32 format
     local_ip = _device_ip()
+    version = _device_version()
+    ssid = _device_ssid()
     notification = {
         "type": "notification",
         "notification_type": payload,
@@ -644,6 +649,9 @@ def _send_notification(payload: str, data: dict = None,
         "body": body,
         "data": data or {},
         "local_ip": local_ip,
+        "version": version,
+        "firmware": version,
+        "wifi_ssid": ssid,
     }
 
     # Handle file attachment — compress + base64
@@ -973,6 +981,22 @@ def _device_ip() -> str:
         return ""
 
 
+def _device_ssid() -> str:
+    try:
+        from bcmeter.state import state
+        return str(state.snapshot().get("wifi_ssid") or "").strip()
+    except Exception:
+        return ""
+
+
+def _device_version() -> str:
+    try:
+        from bcmeter import __version__
+        return __version__
+    except Exception:
+        return ""
+
+
 def send_filter_alert(current_atn: float, atn_rate: float = 0.0,
                       loading_pct: int = 0, device_name: str = "bcMeter",
                       initial_loading_pct: float = None):
@@ -1032,6 +1056,41 @@ def send_negative_bc_alert(session_avg: float, hour_avg: float):
         "bc_hour_avg": hour_avg,
         "message": "BC readings have been negative for over 1 hour. Possible clean air or instrument issue.",
     })
+
+
+def send_reference_drop_alert(ch: int, baseline_ref: float, current_ref: float,
+                              drop_pct: float, window_minutes: float,
+                              sen: float, atn: float, bc: float,
+                              flow: float, temp: float):
+    if not can_send_mail("ReferenceDrop", _COOLDOWN_INTERVALS["ReferenceDrop"]):
+        return
+    try:
+        from bcmeter import incident_log
+        incidents = json.loads(incident_log.to_json())
+    except Exception:
+        incidents = []
+    if send_email("Status", {
+        "event": "Reference Signal Drop",
+        "trigger": "rapid_drop" if baseline_ref > 0 and drop_pct > 0 else "critical_low",
+        "channel": ch,
+        "baseline_ref": baseline_ref,
+        "current_ref": current_ref,
+        "drop_pct": drop_pct,
+        "window_minutes": window_minutes,
+        "sen": sen,
+        "atn": atn,
+        "bc": bc,
+        "flow": flow,
+        "temp": temp,
+        "incidents": incidents,
+        "message": (
+            "Reference signal dropped rapidly against the recent baseline without a recent LED recovery. "
+            "Check filter tape, LED, optics and ADC wiring."
+            if baseline_ref > 0 and drop_pct > 0 else
+            "Reference signal is critically low. Check filter tape, LED, optics and ADC wiring."
+        ),
+    }):
+        set_last_mail_time("ReferenceDrop")
 
 
 def send_flow_bump(old_target: float, new_target: float):
@@ -1260,6 +1319,7 @@ def send_wifi_connected(modem_available: bool = False,
     ip = _device_ip()
     geo = _geo_data()
     hostname = socket.gethostname()
+    ssid = _device_ssid()
     msg = f"Access the device interface at http://{ip}/"
     if "latitude" in geo:
         msg += f"\nMap: {geo['location_url']}"
@@ -1269,7 +1329,7 @@ def send_wifi_connected(modem_available: bool = False,
         "ip": ip,
         "local_ip": ip,
         "device_url": f"http://{ip}/",
-        "network": hostname,
+        "network": ssid or hostname,
         **geo,
     }
 

@@ -53,6 +53,7 @@ REGISTRY = [
     CfgEntry("sample_spot_diameter", "Sample spot diameter (cm)", "dev:calibration", T_FLOAT, 0.4),
     CfgEntry("filter_scattering_factor", "Filter scattering factor", "dev:calibration", T_FLOAT, 1.39),
     CfgEntry("device_specific_correction_factor", "Device correction factor", "dev:calibration", T_FLOAT, 1.0),
+    CfgEntry("calibration_warmup_seconds", "Calibration LED warmup time (s)", "dev:calibration", T_INT, 120),
     CfgEntry("ap_secured", "Protect hotspot with password", "device", T_BOOL, False),
     CfgEntry("ap_password", "Hotspot password", "device", T_STRING, "bcMeterbcMeter"),
     CfgEntry("disable_pump_control", "Disable internal pump control", "device", T_BOOL, False),

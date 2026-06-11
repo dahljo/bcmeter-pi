@@ -61,6 +61,7 @@ class SystemState:
 
     # Calibration
     last_cal_time: str = "never"
+    calibration_running: bool = False
 
     # Network
     wifi_mode: str = "sta"  # "sta" or "ap"

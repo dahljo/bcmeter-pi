@@ -29,18 +29,33 @@ logger = logging.getLogger("bcmeter.measure")
 # ---------------------------------------------------------------------------
 # Constants (ported from ESP32 measure.cpp / config.h)
 # ---------------------------------------------------------------------------
-ADC_LOW_LIMIT_DEFAULT = 0.1
+ADC_LOW_LIMIT_DEFAULT = 0.5
 TEMP_LIMIT = 65.0
 ATN_LIMIT = 120.0
 REF_MIN_LED_ON = 0.05
 FLOW_SAMPLE_INTERVAL_S = 0.25
 OUTLIER_REJECT_PCT = 0.20
+PROACTIVE_SAT_PCT = 0.05
+PROACTIVE_MIN_READS = 50
+PROACTIVE_MAX_RETRIES = 1
+RECOVERY_HIGH_OOB_LIMIT_PCT = 5.0
 PRIME_DURATION_S = 2.0
 LED_SETTLE_S = 0.2
 SIGMA_REJECT_LIMIT = 3.0
 SHADOW_FACTOR = 1.2
 LED_DUTY_FLOOR_DEFAULT = 30
+CAL_VAL_READS = 80
+CAL_WARMUP_CHECK_READS = 32
+CAL_OOB_LIMIT_PCT = 5.0
+CAL_DUTY_SETTLE_S = 5.0
+CAL_DUTY_STEP = 5
+CAL_DUTY_MIN = 5
+CAL_WARMUP_DEFAULT_S = 120
 BC_HOUR_RING_SIZE = 360
+REF_DROP_WINDOW_S = 30 * 60
+REF_DROP_PCT = 20.0
+REF_DROP_MIN_ABS_V = 0.40
+REF_CRITICAL_LOW_LIMIT = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +214,9 @@ class MeasureEngine:
         self._session_indoor = False
         self._next_session_indoor_override = False
         self._session_row_count = 0
+        self._ref_trend = deque(maxlen=12)
+        self._ref_drop_active = False
+        self._last_led_recovery_s = 0.0
 
     def set_next_session_indoor(self, on: bool):
         """One-shot override consumed on the next session start."""
@@ -269,7 +287,9 @@ class MeasureEngine:
                 # Periodic idle filter check every 30 s — brief LED burst
                 # to keep last_sen/last_ref current for the UI filter indicator
                 now = time.time()
-                if self._adc.present and (now - last_idle_filter_check >= 30.0):
+                if (self._adc.present
+                        and not state.get("calibration_running")
+                        and (now - last_idle_filter_check >= 30.0)):
                     last_idle_filter_check = now
                     try:
                         duty_0 = self._cfg.get_int("led_duty_cycle_880nm", 255)
@@ -370,25 +390,133 @@ class MeasureEngine:
 
             self._cfg.set_int(duty_key, duty)
 
-            # Phase 2: average sen/ref over 10 seconds to compute K
+            # Phase 2: warm LED to thermal steady state before computing K.
+            duty_adjusted = False
+            warmup_s = max(0, self._cfg.get_int("calibration_warmup_seconds", CAL_WARMUP_DEFAULT_S))
+            _log(f"[Cal] CH{ch} duty={duty} found; LED warmup {warmup_s}s before calK integration")
             self._optics.set_led_duty(ch, duty)
             self._optics.led_on(ch)
-            time.sleep(0.5)
-            if self._adc.type == "spi":
-                avg_sen, avg_ref = self._adc.read_interleaved(duration_s=10.0)
-                count = 10
-            else:
-                sen_sum = 0.0
-                ref_sum = 0.0
-                count = 0
-                end_t = time.time() + 10.0
-                while time.time() < end_t:
-                    sen_sum += self._adc.read_sensor()
-                    ref_sum += self._adc.read_reference()
-                    count += 1
-                    time.sleep(0.001)
-                avg_sen = sen_sum / count if count else 0.0
-                avg_ref = ref_sum / count if count else 0.0
+            for sec in range(warmup_s):
+                time.sleep(1.0)
+                self._optics.set_led_duty(ch, duty)
+                self._optics.led_on(ch)
+                if (sec + 1) % 5 == 0:
+                    probe = self._probe_lit_led_duty(ch, CAL_WARMUP_CHECK_READS, 0.0)
+                    high_oob_pct = self._led_duty_probe_high_oob_pct(probe)
+                    if high_oob_pct > CAL_OOB_LIMIT_PCT:
+                        if duty <= CAL_DUTY_MIN:
+                            _log(
+                                f"[Cal] CH{ch} FAILED: {high_oob_pct:.1f}% high-OOB "
+                                f"during warmup at minimum duty={duty}"
+                            )
+                            self._optics.led_off(ch)
+                            return False
+                        old_duty = duty
+                        duty = (
+                            duty - CAL_DUTY_STEP
+                            if duty > CAL_DUTY_MIN + CAL_DUTY_STEP
+                            else CAL_DUTY_MIN
+                        )
+                        duty_adjusted = True
+                        self._cfg.set_int(duty_key, duty)
+                        self._optics.set_led_duty(ch, duty)
+                        self._optics.led_on(ch)
+                        _log(
+                            f"[Cal] CH{ch} warmup {sec + 1}/{warmup_s}s: "
+                            f"{high_oob_pct:.1f}% high-OOB at duty={old_duty} - lowering to {duty}"
+                        )
+                if (sec + 1) % 15 == 0:
+                    _log(f"[Cal] CH{ch} warmup {sec + 1}/{warmup_s}s")
+
+            # Phase 3: validate saturation at warm LED temperature.
+            self._optics.led_on(ch)
+            time.sleep(0.05)
+            s_pre = self._adc.read_sensor()
+            r_pre = self._adc.read_reference()
+            _log(f"[Cal] CH{ch} pre-integration probe: sen={s_pre:.3f} ref={r_pre:.3f}")
+
+            duty_ok = False
+            for attempt in range(50):
+                probe = self._probe_lit_led_duty(
+                    ch,
+                    CAL_VAL_READS,
+                    0.05 if attempt == 0 else CAL_DUTY_SETTLE_S,
+                )
+                oob_pct = self._led_duty_probe_oob_pct(probe)
+                phase = "post-warmup" if attempt == 0 else "post-adjust"
+                _log(
+                    f"[Cal] CH{ch} {phase} stats: "
+                    f"sen {probe['s_min']:.3f}/{probe['s_mean']:.3f}/{probe['s_max']:.3f} "
+                    f"ref {probe['r_min']:.3f}/{probe['r_mean']:.3f}/{probe['r_max']:.3f}"
+                )
+                _log(
+                    f"[Cal] CH{ch} {phase} OOB: "
+                    f"sen>{self._adc_high_limit:.1f}={probe['s_hi']} "
+                    f"sen<low={probe['s_lo']} "
+                    f"ref>{self._adc_high_limit:.1f}={probe['r_hi']} "
+                    f"ref<low={probe['r_lo']} of {probe['count']}"
+                )
+                if oob_pct <= CAL_OOB_LIMIT_PCT:
+                    _log(f"[Cal] CH{ch} {phase} OK ({oob_pct:.1f}% OOB, duty={duty})")
+                    duty_ok = True
+                    break
+                if probe["hi"] == 0:
+                    _log(
+                        f"[Cal] CH{ch} FAILED: {oob_pct:.1f}% OOB is low-signal "
+                        f"at duty={duty}; lowering duty would worsen it"
+                    )
+                    self._optics.led_off(ch)
+                    return False
+                if duty <= CAL_DUTY_MIN:
+                    _log(f"[Cal] CH{ch} FAILED: {oob_pct:.1f}% high-OOB at minimum duty={duty}")
+                    self._optics.led_off(ch)
+                    return False
+
+                old_duty = duty
+                duty = (
+                    duty - CAL_DUTY_STEP
+                    if duty > CAL_DUTY_MIN + CAL_DUTY_STEP
+                    else CAL_DUTY_MIN
+                )
+                duty_adjusted = True
+                self._cfg.set_int(duty_key, duty)
+                self._optics.set_led_duty(ch, duty)
+                self._optics.led_on(ch)
+                _log(
+                    f"[Cal] CH{ch} {oob_pct:.1f}% OOB at duty={old_duty} - "
+                    f"lowering to {duty}, settling {CAL_DUTY_SETTLE_S:.0f}s"
+                )
+
+            if not duty_ok:
+                _log(f"[Cal] CH{ch} FAILED: duty validation did not converge at duty={duty}")
+                self._optics.led_off(ch)
+                return False
+
+            if duty_adjusted:
+                notes.add(notes.LED_REC)
+                incident_log.add("warn", "CH%d calibration LED duty adjusted to %d", ch, duty)
+
+            # Phase 4: average sen/ref over 10 seconds to compute K.
+            self._optics.set_led_duty(ch, duty)
+            self._optics.led_on(ch)
+            time.sleep(0.05)
+            sen_sum = 0.0
+            ref_sum = 0.0
+            count = 0
+            end_t = time.time() + 10.0
+            next_reassert = time.time() + 0.25
+            while time.time() < end_t:
+                now = time.time()
+                if now >= next_reassert:
+                    self._optics.set_led_duty(ch, duty)
+                    self._optics.led_on(ch)
+                    next_reassert = now + 0.25
+                sen_sum += self._adc.read_sensor()
+                ref_sum += self._adc.read_reference()
+                count += 1
+                time.sleep(0.001)
+            avg_sen = sen_sum / count if count else 0.0
+            avg_ref = ref_sum / count if count else 0.0
 
             self._optics.led_off(ch)
 
@@ -473,6 +601,9 @@ class MeasureEngine:
         )
         self._next_session_indoor_override = False
         self._session_row_count = 0
+        self._ref_trend.clear()
+        self._ref_drop_active = False
+        self._last_led_recovery_s = 0.0
 
         email_handler.reset_team_offset()
         email_handler.reset_log_mail_offset()
@@ -862,6 +993,8 @@ class MeasureEngine:
         keep_single_led_on = num_ch == 1
 
         for ch in range(num_ch):
+            sat_retries = 0
+            led_recovered_this_cycle = False
             self._optics.led_on(ch)
             time.sleep(LED_SETTLE_S)
             ch_start = time.time()
@@ -895,6 +1028,36 @@ class MeasureEngine:
                 if s_cal > self._adc_high_limit or r > self._adc_high_limit:
                     adc_high_total += 1
                     ch_high_counts[ch] += 1
+                    if (raw_counts[ch] >= PROACTIVE_MIN_READS
+                            and ch_high_counts[ch] > raw_counts[ch] * PROACTIVE_SAT_PCT
+                            and sat_retries < PROACTIVE_MAX_RETRIES):
+                        logger.warning(
+                            "CH%d: %d/%d saturated (%.0f%%) — proactive LED recovery",
+                            ch, ch_high_counts[ch], raw_counts[ch],
+                            100.0 * ch_high_counts[ch] / raw_counts[ch],
+                        )
+                        if self._recover_led_duty(ch):
+                            led_recovered_this_cycle = True
+                            sat_retries += 1
+                            raw_counts[ch] = 0
+                            ch_high_counts[ch] = 0
+                            sen_bufs[ch].clear()
+                            ref_bufs[ch].clear()
+                            self._optics.led_on(ch)
+                            time.sleep(0.5)
+                            ch_start = time.time()
+                            continue
+                        logger.error("CH%d: proactive LED recovery failed", ch)
+                        incident_log.add("error", "CH%d ADC saturated, LED recovery failed — no filter?", ch)
+                        try:
+                            email_handler.send_signal_noise_alert(
+                                f"CH{ch} ADC saturated, LED recovery failed"
+                            )
+                        except Exception:
+                            pass
+                        self._set_error(ErrorCode.ERR_ADC_SATURATED)
+                        aborted = True
+                        break
                 elif s_cal < adc_low_limit or r < adc_low_limit:
                     adc_low_total += 1
                     if s_cal > 0.0 and r > 0.0:
@@ -947,14 +1110,11 @@ class MeasureEngine:
                 if rejected_ratio > OUTLIER_REJECT_PCT:
                     high_dominant = ch_high_counts[ch] > (raw_counts[ch] / 2)
                     if high_dominant:
-                        logger.warning(
-                            "CH%d: %.0f%% saturated, attempting LED recovery",
-                            ch, rejected_ratio * 100,
-                        )
-                        recovered = self._recover_led_duty(ch)
-                        if recovered:
-                            logger.info("CH%d: LED duty lowered, applying next cycle", ch)
-                            incident_log.add("warn", "CH%d LED duty lowered (ADC saturated)", ch)
+                        if led_recovered_this_cycle:
+                            logger.warning(
+                                "CH%d: %.0f%% saturated after LED recovery — waiting for next cycle",
+                                ch, rejected_ratio * 100,
+                            )
                             if buf_count >= 5:
                                 sen_mean, _, _ = sigma_reject(sen_bufs[ch], SIGMA_REJECT_LIMIT)
                                 ref_mean, _, _ = sigma_reject(ref_bufs[ch], SIGMA_REJECT_LIMIT)
@@ -962,16 +1122,33 @@ class MeasureEngine:
                                 ref_avg[ch] = ref_mean
                                 sample_counts[ch] = buf_count
                         else:
-                            logger.error("CH%d: LED recovery failed", ch)
-                            incident_log.add("error", "CH%d ADC saturated, LED recovery failed — no filter?", ch)
-                            try:
-                                email_handler.send_signal_noise_alert(
-                                    f"CH{ch} ADC saturated, LED recovery failed"
-                                )
-                            except Exception:
-                                pass
-                            self._set_error(ErrorCode.ERR_ADC_SATURATED)
-                            aborted = True
+                            logger.warning(
+                                "CH%d: %.0f%% saturated, attempting LED recovery",
+                                ch, rejected_ratio * 100,
+                            )
+                            recovered = self._recover_led_duty(ch)
+                            if recovered:
+                                led_recovered_this_cycle = True
+                                logger.info("CH%d: LED duty lowered, applying next cycle", ch)
+                                if keep_single_led_on:
+                                    self._optics.led_on(ch)
+                                if buf_count >= 5:
+                                    sen_mean, _, _ = sigma_reject(sen_bufs[ch], SIGMA_REJECT_LIMIT)
+                                    ref_mean, _, _ = sigma_reject(ref_bufs[ch], SIGMA_REJECT_LIMIT)
+                                    sen_avg[ch] = sen_mean
+                                    ref_avg[ch] = ref_mean
+                                    sample_counts[ch] = buf_count
+                            else:
+                                logger.error("CH%d: LED recovery failed", ch)
+                                incident_log.add("error", "CH%d ADC saturated, LED recovery failed — no filter?", ch)
+                                try:
+                                    email_handler.send_signal_noise_alert(
+                                        f"CH{ch} ADC saturated, LED recovery failed"
+                                    )
+                                except Exception:
+                                    pass
+                                self._set_error(ErrorCode.ERR_ADC_SATURATED)
+                                aborted = True
                     else:
                         logger.warning(
                             "CH%d: %.0f%% unusable low-signal reads - continuing",
@@ -1179,6 +1356,12 @@ class MeasureEngine:
             notes.add(notes.ADC_HI)
         if adc_low_total > 0:
             notes.add(notes.ADC_LO)
+        log_this_row = time.time() >= self._warmup_end
+        if log_this_row and sample_counts and sample_counts[0] >= 5:
+            self._check_reference_drop(
+                ref_avg[0], sen_avg[0], self._last_atn[0], bc_arr[0],
+                avg_flow, row.temperature, time.time(), adc_low_limit,
+            )
         row.notice = notes.drain()
 
         # ---- GPS ----
@@ -1206,6 +1389,149 @@ class MeasureEngine:
 
         return row, bc_arr, False
 
+    def _check_reference_drop(self, ref: float, sen: float, atn: float, bc: float,
+                              flow: float, temp: float, now_s: float,
+                              adc_low_limit: float):
+        baseline_ref = 0.0
+        baseline_ts = 0.0
+        for ts, old_ref in self._ref_trend:
+            age = now_s - ts
+            if age <= 0 or age > REF_DROP_WINDOW_S:
+                continue
+            if old_ref >= adc_low_limit and old_ref > baseline_ref:
+                baseline_ref = old_ref
+                baseline_ts = ts
+
+        if ref > 0.0:
+            drop = baseline_ref - ref
+            drop_pct = (drop / baseline_ref) * 100.0 if baseline_ref > 0.0 else 0.0
+            rapid_drop = (
+                baseline_ref >= adc_low_limit
+                and drop >= REF_DROP_MIN_ABS_V
+                and drop_pct >= REF_DROP_PCT
+            )
+            critical_low = baseline_ref < adc_low_limit and ref < REF_CRITICAL_LOW_LIMIT
+            recent_led_recovery = (
+                self._last_led_recovery_s > 0.0
+                and (now_s - self._last_led_recovery_s) <= REF_DROP_WINDOW_S
+            )
+            if not self._ref_drop_active and not recent_led_recovery and (rapid_drop or critical_low):
+                window_min = (now_s - baseline_ts) / 60.0 if rapid_drop else 0.0
+                self._ref_drop_active = True
+                notes.add(notes.REF_DROP)
+                if rapid_drop:
+                    incident_log.add(
+                        "error",
+                        "CH0 reference drop %.3f->%.3f V (%.0f%% in %.1f min)",
+                        baseline_ref, ref, drop_pct, window_min,
+                    )
+                else:
+                    incident_log.add("error", "CH0 reference critically low %.3f V", ref)
+                state.set("warning_msg", "Reference signal drop - inspect optics")
+                try:
+                    email_handler.send_reference_drop_alert(
+                        0, baseline_ref, ref, drop_pct, window_min,
+                        sen, atn, bc, flow, temp,
+                    )
+                except Exception:
+                    logger.debug("Failed to queue reference-drop alert", exc_info=True)
+            if not rapid_drop and not critical_low:
+                self._ref_drop_active = False
+
+        if ref > 0.0:
+            self._ref_trend.append((now_s, ref))
+
+    def _empty_led_probe(self) -> dict:
+        return {
+            "s_min": float("inf"),
+            "s_mean": 0.0,
+            "s_max": float("-inf"),
+            "r_min": float("inf"),
+            "r_mean": 0.0,
+            "r_max": float("-inf"),
+            "s_hi": 0,
+            "s_lo": 0,
+            "r_hi": 0,
+            "r_lo": 0,
+            "oob": 0,
+            "hi": 0,
+            "count": 0,
+        }
+
+    def _finish_led_probe(self, probe: dict) -> dict:
+        count = probe["count"]
+        if count <= 0:
+            probe.update({
+                "s_min": 0.0, "s_mean": 0.0, "s_max": 0.0,
+                "r_min": 0.0, "r_mean": 0.0, "r_max": 0.0,
+            })
+            return probe
+        probe["s_mean"] /= count
+        probe["r_mean"] /= count
+        return probe
+
+    def _probe_lit_led_duty(self, ch: int, reads: int, settle_s: float = 0.0) -> dict:
+        probe = self._empty_led_probe()
+        if reads <= 0:
+            return self._finish_led_probe(probe)
+        adc_low_limit = self._cfg.get_float("adc_low_limit", ADC_LOW_LIMIT_DEFAULT)
+        if settle_s > 0:
+            time.sleep(settle_s)
+        for _ in range(reads):
+            try:
+                s = self._adc.read_sensor() * self._cal_k[ch]
+                r = self._adc.read_reference()
+            except Exception:
+                logger.debug("LED duty probe read failed", exc_info=True)
+                continue
+
+            oob = False
+            high = False
+            if s > self._adc_high_limit:
+                probe["s_hi"] += 1
+                oob = True
+                high = True
+            if s < adc_low_limit:
+                probe["s_lo"] += 1
+                oob = True
+            if r > self._adc_high_limit:
+                probe["r_hi"] += 1
+                oob = True
+                high = True
+            if r < adc_low_limit:
+                probe["r_lo"] += 1
+                oob = True
+            if oob:
+                probe["oob"] += 1
+            if high:
+                probe["hi"] += 1
+
+            probe["s_min"] = min(probe["s_min"], s)
+            probe["s_max"] = max(probe["s_max"], s)
+            probe["r_min"] = min(probe["r_min"], r)
+            probe["r_max"] = max(probe["r_max"], r)
+            probe["s_mean"] += s
+            probe["r_mean"] += r
+            probe["count"] += 1
+            time.sleep(0.001)
+        return self._finish_led_probe(probe)
+
+    def _probe_led_duty(self, ch: int, duty: int, reads: int, settle_s: float = 0.0) -> dict:
+        self._optics.set_led_duty(ch, max(0, min(255, duty)))
+        self._optics.led_on(ch)
+        try:
+            return self._probe_lit_led_duty(ch, reads, settle_s)
+        finally:
+            self._optics.led_off(ch)
+
+    def _led_duty_probe_oob_pct(self, probe: dict) -> float:
+        count = probe.get("count", 0)
+        return (100.0 * probe.get("oob", 0) / count) if count else 100.0
+
+    def _led_duty_probe_high_oob_pct(self, probe: dict) -> float:
+        count = probe.get("count", 0)
+        return (100.0 * probe.get("hi", 0) / count) if count else 100.0
+
     # ------------------------------------------------------------------
     # LED duty recovery
     # ------------------------------------------------------------------
@@ -1218,48 +1544,58 @@ class MeasureEngine:
         wl_name = WAVELENGTH_NAMES[ch]
         duty_key = f"led_duty_cycle_{wl_name}"
         old_duty = self._cfg.get_int(duty_key, 128)
-        duty_floor = self._cfg.get_int("led_duty_floor", LED_DUTY_FLOOR_DEFAULT)
+        if old_duty <= CAL_DUTY_MIN:
+            logger.warning("CH%d duty already at minimum %d", ch, CAL_DUTY_MIN)
+            return False
+
+        duty_floor = CAL_DUTY_MIN
         duty = old_duty
 
-        for _ in range(40):
-            duty = max(duty - 5, 0)
+        for _ in range(50):
+            duty = duty - CAL_DUTY_STEP if duty > CAL_DUTY_MIN + CAL_DUTY_STEP else CAL_DUTY_MIN
             if duty < duty_floor:
                 logger.warning(
                     "CH%d duty %d hit floor %d -- no filter?", ch, duty, duty_floor,
                 )
                 return False
 
-            self._optics.set_led_duty(ch, duty)
-            self._optics.led_on(ch)
-            time.sleep(0.2)
-            s = self._adc.read_sensor()
-            r = self._adc.read_reference()
-            self._optics.led_off(ch)
+            probe = self._probe_led_duty(ch, duty, reads=32, settle_s=0.2)
+            high_count = probe["hi"]
+            low_count = probe["s_lo"] + probe["r_lo"]
+            high_pct = self._led_duty_probe_high_oob_pct(probe)
 
-            logger.debug("Recovery CH%d duty=%d sen=%.3f ref=%.3f", ch, duty, s, r)
+            logger.debug(
+                "Recovery CH%d duty=%d sen=%.3f/%.3f/%.3f ref=%.3f/%.3f/%.3f high=%d low=%d/%d",
+                ch, duty,
+                probe["s_min"], probe["s_mean"], probe["s_max"],
+                probe["r_min"], probe["r_mean"], probe["r_max"],
+                high_count, low_count, probe["count"],
+            )
 
-            if s < self._adc_high_limit and r < self._adc_high_limit:
-                next_duty = min(duty + 5, 255)
-                self._optics.set_led_duty(ch, next_duty)
-                self._optics.led_on(ch)
-                time.sleep(0.2)
-                s2 = self._adc.read_sensor()
-                r2 = self._adc.read_reference()
-                self._optics.led_off(ch)
+            if high_pct <= RECOVERY_HIGH_OOB_LIMIT_PCT:
+                break
+            if low_count > 0:
+                logger.warning(
+                    "CH%d still has %.1f%% high OOB but low signal appeared; stopping at duty=%d",
+                    ch, high_pct, duty,
+                )
+                break
+            if duty <= duty_floor:
+                logger.warning("CH%d duty hit minimum %d while still high", ch, duty_floor)
+                break
 
-                if s2 >= self._adc_high_limit or r2 >= self._adc_high_limit:
-                    # Current duty is the maximum safe value
-                    self._cfg.set_int(duty_key, duty)
-                    self._optics.set_led_duty(ch, duty)
-                    self._cfg.save()
-                    notes.add("LED_REC")
-                    logger.info(
-                        "CH%d LED duty recovered %d -> %d", ch, old_duty, duty,
-                    )
-                    return True
-                duty = next_duty
-
-        return False
+        self._cfg.set_int(duty_key, duty)
+        self._optics.set_led_duty(ch, duty)
+        self._cfg.save()
+        notes.add(notes.LED_REC)
+        self._last_led_recovery_s = time.time()
+        incident_log.add("warn", "CH%d LED duty adjusted %d->%d", ch, old_duty, duty)
+        try:
+            email_handler.send_adc_saturation_recovery(ch, old_duty, duty)
+        except Exception:
+            logger.debug("Failed to queue ADC recovery alert", exc_info=True)
+        logger.info("CH%d LED duty recovered %d -> %d", ch, old_duty, duty)
+        return True
 
     # ------------------------------------------------------------------
     # Sensor helpers
