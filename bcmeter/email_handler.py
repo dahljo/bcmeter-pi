@@ -449,7 +449,7 @@ _MODEM_KEEP_EXACT = {
     "bcmDate", "bcmTime", "AAE", "Temperature", "sht_humidity",
     "airflow", "relativeLoad", "PM2.5", "PM10",
 }
-_MODEM_KEEP_PREFIX = ("BCngm3", "BCugm3")
+_MODEM_KEEP_PREFIX = ("BCngm3",)
 
 
 def _keep_aae_for_config(cfg: dict) -> bool:

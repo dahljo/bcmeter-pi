@@ -127,8 +127,8 @@ function $(id){return document.getElementById(id)}
 var skipCols={bcmDate:1,bcmTime:1,notice:1,notes:1,sampleDuration:1,tempSlope10:1};
 var colLabels={'airflow':'Airflow (L/min)','relativeLoad':'Relative Load','AAE':'AAE','Temperature':'Temperature','sht_humidity':'Humidity (%)','humidity':'Humidity (%)','pressure':'Pressure (hPa)','hPa':'Pressure (hPa)','lat':'Latitude','lon':'Longitude','altitude':'Altitude'};
 function niceLabel(c){if(colLabels[c])return colLabels[c];
-var m=c.match(/^BC(ng|ug)m3_unfiltered_(.+)$/);if(m)return'BC unf. '+m[2]+' ('+m[1]+'/m\u00b3)';
-m=c.match(/^BC(ng|ug)m3_(.+)$/);if(m)return'BC '+m[2]+' ('+m[1]+'/m\u00b3)';
+var m=c.match(/^BCngm3_unfiltered_(.+)$/);if(m)return'BC unf. '+m[1]+' (ng/m\u00b3)';
+m=c.match(/^BCngm3_(.+)$/);if(m)return'BC '+m[1]+' (ng/m\u00b3)';
 m=c.match(/^bcmATN_(.+)$/);if(m)return'ATN '+m[1];
 m=c.match(/^bcmSen_(.+)$/);if(m)return'Sensor '+m[1]+' (V)';
 m=c.match(/^bcmRef_(.+)$/);if(m)return'Ref '+m[1]+' (V)';
@@ -139,13 +139,13 @@ if(key==='airflow')return 3;
 if(key==='pressure'||key==='hPa')return 0;
 if(/^bcmRef_/.test(key)||/^bcmSen_/.test(key))return 4;
 if(/^bcmATN_/.test(key))return 2;
-if(/^BC(ng|ug)m3_/.test(key))return 0;
+if(/^BCngm3_/.test(key))return 0;
 if(key==='AAE')return 2;
 if(key==='PM2.5'||key==='PM10')return 0;
 if(key==='relativeLoad'||key==='Temperature'||key==='sht_humidity'||key==='humidity')return 1;
 return 2;
 }
-function isBCCol(key){return key&&/^BC(ng|ug)m3_/.test(key)}
+function isBCCol(key){return key&&/^BCngm3_/.test(key)}
 function hasData(col){
 if(!chartData.length)return false;
 for(var i=0;i<chartData.length;i++){
@@ -253,7 +253,7 @@ var o1=document.createElement('option');o1.value=c;o1.textContent=niceLabel(c);m
 var o2=document.createElement('option');o2.value=c;o2.textContent=niceLabel(c);m2.appendChild(o2);
 });
 if(!y1Key&&plottable.length){
-var bcCol=plottable.find(function(c){return c.match(/^BC(ng|ug)m3_[0-9]/)&&!c.match(/unfiltered/)});
+var bcCol=plottable.find(function(c){return c.match(/^BCngm3_[0-9]/)&&!c.match(/unfiltered/)});
 y1Key=bcCol||plottable[0];
 }
 m1.value=y1Key;m2.value=y2Key;
@@ -323,7 +323,7 @@ function computeNegBCFlag(data){
 if(!data.length) return;
 var bcKey=null;
 for(var k in data[0]){
-if(k.match(/^BC(ng|ug)m3_[0-9]/)&&!k.match(/unfiltered/)){bcKey=k;break}
+if(k.match(/^BCngm3_[0-9]/)&&!k.match(/unfiltered/)){bcKey=k;break}
 }
 if(!bcKey){for(var i=0;i<data.length;i++) data[i].bcNeg15=false;return}
 var times=data.map(parseTime);

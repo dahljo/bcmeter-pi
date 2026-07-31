@@ -53,6 +53,13 @@ class SystemState:
     # Warnings (non-fatal, device keeps running)
     warning_msg: str = ""
 
+    # Warm-up timing uses monotonic seconds so wall-clock synchronization
+    # cannot make progress jump backwards or forwards. Progress remains
+    # frozen when an error stops the session.
+    warmup_started_monotonic: float = 0.0
+    warmup_end_monotonic: float = 0.0
+    warmup_progress: int = 0
+
     # Session tracking
     filter_status: int = 5
     sample_count: int = 0

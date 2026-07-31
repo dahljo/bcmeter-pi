@@ -240,8 +240,14 @@ def _handle_start(force: bool, indoor: str = "") -> PlainTextResponse:
     # Clear previous error and start
     if _state:
         from bcmeter.errors import ErrorCode
-        _state.set("error", ErrorCode.ERR_NONE)
-        _state.sampling = True
+        _state.update(
+            error=ErrorCode.ERR_NONE,
+            warning_msg="",
+            warmup_started_monotonic=0.0,
+            warmup_end_monotonic=0.0,
+            warmup_progress=0,
+            sampling=True,
+        )
 
     return PlainTextResponse("Sampling started")
 

@@ -30,6 +30,9 @@ logger = logging.getLogger("bcmeter.measure")
 # Constants (ported from ESP32 measure.cpp / config.h)
 # ---------------------------------------------------------------------------
 ADC_LOW_LIMIT_DEFAULT = 0.5
+# Emergency cutoff. This is already above the 60°C rated operating maximum
+# of optional D6F/SPS30 peripherals, so it must not be raised as a way to avoid
+# nuisance trips.
 TEMP_LIMIT = 65.0
 ATN_LIMIT = 120.0
 REF_MIN_LED_ON = 0.05
@@ -564,20 +567,30 @@ class MeasureEngine:
         """Execute one complete measurement session."""
 
         # ---- Preflight ----
-        state.set("init_step", InitStep.INIT_PREFLIGHT)
+        # A new attempt is a clean state boundary. In particular, warnings
+        # raised by a loaded/missing filter during a previous warm-up must not
+        # survive after the filter has been replaced.
+        attempt_start = time.monotonic()
+        attempt_warmup = max(0, self._cfg.get_int("warmup_seconds", 600))
+        state.update(
+            error=ErrorCode.ERR_NONE,
+            warning_msg="",
+            init_step=InitStep.INIT_PREFLIGHT,
+            warmup_started_monotonic=attempt_start,
+            warmup_end_monotonic=attempt_start + attempt_warmup,
+            warmup_progress=100 if attempt_warmup <= 0 else 0,
+        )
         error = self._preflight_check()
         if error != ErrorCode.ERR_NONE:
             logger.error("Preflight FAILED: %s", error.name)
             self._set_error(error)
             return
 
-        state.set("error", ErrorCode.ERR_NONE)
         logger.info("Sampling session started")
         incident_log.add("info", "Measurement session started")
 
         # ---- Config snapshot ----
         num_ch = max(1, min(3, self._cfg.get_int("num_channels", 1)))
-        is_ebc = self._cfg.get_bool("is_ebcMeter", False)
         filter_mode = self._cfg.get_string("bc_filter", "median3")
         for i in range(3):
             self._bc_filters[i].reset(filter_mode)
@@ -639,7 +652,13 @@ class MeasureEngine:
         # ---- Settling / warmup ----
         state.set("init_step", InitStep.INIT_SETTLING)
         warmup_sec = self._cfg.get_int("warmup_seconds", 600)
-        self._warmup_end = time.time() + warmup_sec
+        warmup_start = time.monotonic()
+        self._warmup_end = warmup_start + warmup_sec
+        state.update(
+            warmup_started_monotonic=warmup_start,
+            warmup_end_monotonic=self._warmup_end,
+            warmup_progress=100 if warmup_sec <= 0 else 0,
+        )
         logger.info("Warmup: %d seconds", warmup_sec)
 
         # ---- Mod-5 minute alignment ----
@@ -723,7 +742,7 @@ class MeasureEngine:
 
             try:
                 row, bc_arr, aborted = self._sample_cycle(
-                    num_ch, is_ebc, stop_event, interval_s,
+                    num_ch, stop_event, interval_s,
                 )
             except Exception:
                 logger.exception("Exception during sample cycle")
@@ -766,7 +785,7 @@ class MeasureEngine:
                     logger.debug("Failed to send negative BC alert email")
 
             # ---- Write CSV row (if past warmup) ----
-            if time.time() >= self._warmup_end:
+            if time.monotonic() >= self._warmup_end:
                 try:
                     # First row of the session carries session-level markers
                     # in the `notice` column. bc_archive_ingest reads this
@@ -785,7 +804,7 @@ class MeasureEngine:
                 except Exception:
                     logger.exception("Failed to write CSV row")
             else:
-                remaining = int(self._warmup_end - time.time())
+                remaining = int(self._warmup_end - time.monotonic())
                 logger.debug("Warmup: %ds remaining", remaining)
 
         # ---- Session teardown ----
@@ -938,7 +957,7 @@ class MeasureEngine:
     # ------------------------------------------------------------------
 
     def _sample_cycle(
-        self, num_ch, is_ebc, stop_event, interval_s=0.0,
+        self, num_ch, stop_event, interval_s=0.0,
     ):
         """Execute one measurement cycle across all channels.
 
@@ -1069,9 +1088,10 @@ class MeasureEngine:
 
                 # Transition warmup -> sampling status mid-cycle
                 now = time.time()
+                warmup_now = time.monotonic()
                 if (state.get("init_step") == InitStep.INIT_SETTLING
-                        and now >= self._warmup_end):
-                    state.set("init_step", InitStep.INIT_DONE)
+                        and warmup_now >= self._warmup_end):
+                    state.update(init_step=InitStep.INIT_DONE, warmup_progress=100)
                     logger.info("Warmup complete, logging started")
 
                 # Flow sampling + pump health check
@@ -1356,7 +1376,7 @@ class MeasureEngine:
             notes.add(notes.ADC_HI)
         if adc_low_total > 0:
             notes.add(notes.ADC_LO)
-        log_this_row = time.time() >= self._warmup_end
+        log_this_row = time.monotonic() >= self._warmup_end
         if log_this_row and sample_counts and sample_counts[0] >= 5:
             self._check_reference_drop(
                 ref_avg[0], sen_avg[0], self._last_atn[0], bc_arr[0],
@@ -1673,7 +1693,22 @@ class MeasureEngine:
 
     def _set_error(self, error: ErrorCode):
         """Set error state and stop sampling."""
-        state.set("error", error)
-        state.sampling = False
+        state.update(
+            error=error,
+            sampling=False,
+            warmup_progress=self._current_warmup_progress(),
+        )
         incident_log.add("error", "Measurement error: %s", error.name)
         logger.error("ERROR %d: %s -- stopping", int(error), error.name)
+
+    @staticmethod
+    def _current_warmup_progress(now: float | None = None) -> int:
+        """Return authoritative warm-up progress, also after an error."""
+        start = float(state.get("warmup_started_monotonic") or 0.0)
+        end = float(state.get("warmup_end_monotonic") or 0.0)
+        if start <= 0.0:
+            return 0
+        if end <= start:
+            return 100
+        elapsed = (time.monotonic() if now is None else now) - start
+        return max(0, min(100, int(elapsed * 100.0 / (end - start))))

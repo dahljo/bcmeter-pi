@@ -823,7 +823,6 @@ a.onclick=function(){a.setAttribute('download', makeDownloadName());};
 }
 }
 var sessionStartMs=null;
-var warmupStartMs=null;
 var connFailStatus=0,connFailCSV=0,connLostVisible=false;
 var connLostDotsTimer=null;
 function updateStatCards(){
@@ -972,7 +971,11 @@ if(connFailStatus>=3||connFailCSV>=3) showConnLost();
 function fetchStatus(){
 fetch('/api/status').then(r=>r.json()).then(d=>{
 onFetchOk('status');
+var previousDeviceStatus=lastDeviceStatus;
 lastDeviceStatus=d.status;
+if((d.status===1||d.status===2)&&previousDeviceStatus!==1&&previousDeviceStatus!==2){
+filterPeak=-1;alertFilterShown=false;alertPumpShown=false;alertHumidityShown=false;
+}
 if(d.status===0&&!chartData.length&&$('logs_select').value==='current') loadSessionList();
 deviceName=d.name||'bcMeter';
 if(d.version){var fv=$('fwVersion');if(fv)fv.textContent=d.version}
@@ -983,16 +986,15 @@ var dn=$('deviceName');var stDot=$('statusDot');var stTxt=$('statusText');
 dn.textContent=deviceName;
 if(combineAllBusy||isAllSessions){/* don't overwrite status text when viewing all sessions */}
 else if(d.status==2){
-warmupStartMs=null;
 var ms=extractSessionStartMsFromStatus(d);
 if(ms!==null) sessionStartMs=ms;
 var sinceTxt=formatSince(getSessionStartMs());
 stTxt.textContent='running'+(sinceTxt?(' (since '+sinceTxt+')'):'');
 stDot.className='status-dot green';
 }
-else if(d.status==3){stTxt.textContent='ERROR: '+(d.error_msg||'Unknown');stDot.className='status-dot red'}
-else if(d.status==1){if(!warmupStartMs)warmupStartMs=Date.now();var ws=cfgData['warmup_seconds']!=null?+cfgData['warmup_seconds'].value:600;var pct=Math.min(99,Math.floor((Date.now()-warmupStartMs)/(ws*1000)*100));stTxt.textContent='warming up '+pct+'%';stDot.className='status-dot orange';}
-else if(d.status==0){stTxt.textContent='stopped';stDot.className='status-dot gray';sessionStartMs=null;warmupStartMs=null;filterPeak=-1;alertFilterShown=false;alertPumpShown=false;alertHumidityShown=false;}
+else if(d.status==3){var wp=d.warmup_started&&d.warmup_progress<100?' — warm-up '+d.warmup_progress+'%':'';stTxt.textContent='ERROR: '+(d.error_msg||'Unknown')+wp;stDot.className='status-dot red'}
+else if(d.status==1){var pct=Math.max(0,Math.min(99,+d.warmup_progress||0));stTxt.textContent='warming up '+pct+'%';stDot.className='status-dot orange';}
+else if(d.status==0){stTxt.textContent='stopped';stDot.className='status-dot gray';sessionStartMs=null;filterPeak=-1;alertFilterShown=false;alertPumpShown=false;alertHumidityShown=false;}
 else{stTxt.textContent='status unknown';stDot.className='status-dot gray'}
 if(d.adc===false&&!adcWarnShown){
 adcWarnShown=true;
@@ -1012,7 +1014,7 @@ alertFilterShown=true;$('alertFilterPct').textContent=100-filterPeak;showModal('
 if(d.status==2&&!alertPumpShown&&d.flow<0.05&&d.samples>5){
 alertPumpShown=true;showModal('alertPump');
 }
-if(d.warning_msg&&(d.status==2||d.status==1)){stTxt.textContent=(d.status==1?'warming — ':'running — ')+d.warning_msg;stDot.className='status-dot orange';}
+if(d.warning_msg&&(d.status==2||d.status==1)){stTxt.textContent=(d.status==1?'warming up '+Math.max(0,Math.min(99,+d.warmup_progress||0))+'% — ':'running — ')+d.warning_msg;stDot.className='status-dot orange';}
 }).catch(e=>{onFetchFail('status');console.error(e);});
 }
 function loadSysInfo(){
@@ -2152,8 +2154,8 @@ function resizeCanvas(){var dpr=window.devicePixelRatio||1;var w=canvas.parentEl
 var skipCols={bcmDate:1,bcmTime:1,notice:1,notes:1,sampleDuration:1,tempSlope10:1};
 var colLabels={'airflow':'Airflow (l/min)','relativeLoad':'Relative Load','AAE':'AAE','Temperature':'Temperature','sht_humidity':'Humidity (%)','humidity':'Humidity (%)','pressure':'Pressure (hPa)','hPa':'Pressure (hPa)','lat':'Latitude','lon':'Longitude','altitude':'Altitude'};
 function niceLabel(c){if(colLabels[c])return colLabels[c];
-var m=c.match(/^BC(ng|ug)m3_unfiltered_(.+)$/);if(m)return'BC unf. '+m[2]+' ('+m[1]+'/m³)';
-m=c.match(/^BC(ng|ug)m3_(.+)$/);if(m)return'BC '+m[2]+' ('+m[1]+'/m³)';
+var m=c.match(/^BCngm3_unfiltered_(.+)$/);if(m)return'BC unf. '+m[1]+' (ng/m³)';
+m=c.match(/^BCngm3_(.+)$/);if(m)return'BC '+m[1]+' (ng/m³)';
 m=c.match(/^bcmATN_(.+)$/);if(m)return'ATN '+m[1];
 m=c.match(/^bcmSen_(.+)$/);if(m)return'Sensor '+m[1]+' (V)';
 m=c.match(/^bcmRef_(.+)$/);if(m)return'Ref '+m[1]+' (V)';
@@ -2164,13 +2166,13 @@ if(key==='airflow')return 3;
 if(key==='pressure'||key==='hPa')return 0;
 if(/^bcmRef_/.test(key)||/^bcmSen_/.test(key))return 4;
 if(/^bcmATN_/.test(key))return 2;
-if(/^BC(ng|ug)m3_/.test(key))return 0;
+if(/^BCngm3_/.test(key))return 0;
 if(key==='AAE')return 2;
 if(key==='PM2.5'||key==='PM10')return 0;
 if(key==='relativeLoad'||key==='Temperature'||key==='sht_humidity'||key==='humidity')return 1;
 return 2;
 }
-function isBCCol(key){return key&&/^BC(ng|ug)m3_/.test(key)}
+function isBCCol(key){return key&&/^BCngm3_/.test(key)}
 function hasData(col){
 if(!chartData.length)return false;
 for(var i=0;i<chartData.length;i++){
@@ -2297,7 +2299,7 @@ var o2=document.createElement('option');o2.value=c;o2.textContent=niceLabel(c);m
 if(y1Key&&plottable.indexOf(y1Key)<0)y1Key='';
 if(y2Key&&plottable.indexOf(y2Key)<0)y2Key='';
 if(!y1Key&&plottable.length){
-var bcCol=plottable.find(function(c){return c.match(/^BC(ng|ug)m3_[0-9]/)&&!c.match(/unfiltered/)});
+var bcCol=plottable.find(function(c){return c.match(/^BCngm3_[0-9]/)&&!c.match(/unfiltered/)});
 y1Key=bcCol||plottable[0];
 }
 m1.value=y1Key;m2.value=y2Key;
@@ -2500,7 +2502,7 @@ function computeNegBCFlag(data){
 if(!data.length) return;
 var bcKey=null;
 for(var k in data[0]){
-if(k.match(/^BC(ng|ug)m3_[0-9]/)&&!k.match(/unfiltered/)){bcKey=k;break}
+if(k.match(/^BCngm3_[0-9]/)&&!k.match(/unfiltered/)){bcKey=k;break}
 }
 if(!bcKey){for(var i=0;i<data.length;i++) data[i].bcNeg15=false;return}
 var times=data.map(parseTime);
@@ -2548,7 +2550,7 @@ return out;
 return arr;
 }
 function getATNForBC(key,visData){
-var m=key.match(/^BC(?:ng|ug)m3_(?:unfiltered_)?(.+)$/);
+var m=key.match(/^BCngm3_(?:unfiltered_)?(.+)$/);
 if(!m)return null;
 var atnKey='bcmATN_'+m[1];
 if(!chartData.length||chartData[0][atnKey]===undefined)return null;
@@ -2691,7 +2693,7 @@ return out;
 function filterAxis(rawArr,mode,param,key,visData,resampleN){
 var arr=resampleAxis(rawArr,resampleN||1);
 if(mode==='raw'){
-if(isBCCol(key)){var uf=key.replace(/^(BC(?:ng|ug)m3)_/,'$1_unfiltered_');
+if(isBCCol(key)){var uf=key.replace(/^(BCngm3)_/,'$1_unfiltered_');
 if(visData.length&&visData[0][uf]!==undefined){var ufArr=visData.map(function(d){return d[uf]||0});return resampleAxis(ufArr,resampleN||1)}}
 return arr;
 }
@@ -3257,7 +3259,6 @@ addStep('Calibration complete');
 }
 function doStartSession(){
 clearAutoStart();
-warmupStartMs=null;
 $('startupConfirm').style.display='none';
 $('startupProgress').style.display='';
 $('startupSteps').innerHTML='';
@@ -3298,7 +3299,7 @@ return r;
 });
 });
 chain=chain.then(()=>{
-chartData=[];peakManualReset=false;zoomStart=null;zoomEnd=null;
+chartData=[];filterPeak=-1;alertFilterShown=false;alertPumpShown=false;alertHumidityShown=false;peakManualReset=false;zoomStart=null;zoomEnd=null;
 $('dynamic-avg-value').textContent='-';
 $('avgAll-value').textContent='-';
 $('peak-value').textContent='-';
@@ -3343,7 +3344,8 @@ if(d.error&&d.error>0){
 clearInterval(startupPoll);startupPoll=null;
 $('startupProgress').style.display='none';
 $('startupError').style.display='';
-$('startupErrorMsg').textContent=d.error_msg||'Unknown error';
+$('startupErrorMsg').textContent=(d.error_msg||'Unknown error')+(d.warmup_started&&d.warmup_progress<100?' (warm-up '+d.warmup_progress+'%)':'');
+return;
 }
 if(step>=5){
 clearInterval(startupPoll);startupPoll=null;

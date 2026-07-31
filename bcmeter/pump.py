@@ -15,7 +15,6 @@ from . import incident_log
 logger = logging.getLogger("bcmeter.pump")
 
 PUMP_PIN = 12
-TWELVEVOLT_PIN = 27
 PUMP_PWM_FREQ = 300
 PUMP_PWM_DUTY_MAX = 1_000_000
 

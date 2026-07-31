@@ -132,6 +132,16 @@ async def api_status():
     init_step = snap.get("init_step", 0)
     sampling = snap.get("sampling", False)
 
+    warmup_start = float(snap.get("warmup_started_monotonic", 0.0) or 0.0)
+    warmup_end = float(snap.get("warmup_end_monotonic", 0.0) or 0.0)
+    warmup_progress = int(snap.get("warmup_progress", 0) or 0)
+    if sampling and warmup_end > warmup_start > 0.0:
+        warmup_progress = max(
+            warmup_progress,
+            int((time.monotonic() - warmup_start) * 100.0 / (warmup_end - warmup_start)),
+        )
+    warmup_progress = max(0, min(100, warmup_progress))
+
     # Derive top-level status: 0=idle, 1=initializing, 2=sampling, 3=error
     if err_code != 0:
         status = 3
@@ -152,6 +162,8 @@ async def api_status():
         "warning_msg": snap.get("warning_msg", ""),
         "init_step": int(init_step),
         "init_msg": init_step_string(InitStep(init_step)),
+        "warmup_started": warmup_start > 0.0,
+        "warmup_progress": warmup_progress,
         "name": _cfg.get_string("device_name", "bcMeter") if _cfg else "bcMeter",
         "bc": round(snap.get("last_bc", 0.0), 1),
         "atn": round(snap.get("last_atn", 0.0), 2),

@@ -31,7 +31,7 @@
     },
     "outdoor_measurement": {
         "value": true,
-        "description": "Outdoor measurement \u2014 please disable when taking indoor or emission control measurements",
+        "description": "Outdoor measurement \u2014 disable for indoor measurements",
         "type": "boolean",
         "parameter": "session"
     },
@@ -239,21 +239,9 @@
         "type": "number",
         "parameter": "dev:pump"
     },
-    "twelvevolt_duty": {
-        "value": 20,
-        "description": "12V pump duty cycle",
-        "type": "number",
-        "parameter": "dev:pump"
-    },
     "reverse_dutycycle": {
         "value": false,
         "description": "Reverse pump duty cycle",
-        "type": "boolean",
-        "parameter": "dev:pump"
-    },
-    "TWELVEVOLT_ENABLE": {
-        "value": false,
-        "description": "Enable 12V power output",
         "type": "boolean",
         "parameter": "dev:pump"
     },
@@ -333,12 +321,6 @@
         "value": 1,
         "description": "Number of channels",
         "type": "number",
-        "parameter": "dev:system"
-    },
-    "is_ebcMeter": {
-        "value": false,
-        "description": "Direct emission measurement mode",
-        "type": "boolean",
         "parameter": "dev:system"
     },
     "device_name": {

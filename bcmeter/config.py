@@ -40,7 +40,7 @@ REGISTRY = [
     CfgEntry("airflow_per_minute", "Airflow per minute (L)", "session", T_FLOAT, 0.25),
     CfgEntry("autostart_logging", "Auto-start logging after boot", "session", T_BOOL, False),
     CfgEntry("mobile_sampling", "Mobile measurement mode (log GPS per sample)", "session", T_BOOL, False),
-    CfgEntry("outdoor_measurement", "Outdoor measurement — please disable when taking indoor or emission control measurements", "session", T_BOOL, True),
+    CfgEntry("outdoor_measurement", "Outdoor measurement — disable for indoor measurements", "session", T_BOOL, True),
     CfgEntry("location_mode", "Location mode (0=off,1=auto,2=manual)", "session", T_INT, 1),
     CfgEntry("location_lat", "Manual latitude", "session", T_FLOAT, 0.0),
     CfgEntry("location_lon", "Manual longitude", "session", T_FLOAT, 0.0),
@@ -82,9 +82,7 @@ REGISTRY = [
     CfgEntry("min_pump_duty", "Minimum pump duty cycle", "dev:pump", T_INT, 0),
     CfgEntry("min_airflow_ml", "Minimum airflow (ml/min)", "dev:pump", T_INT, 70),
     # pwm_freq removed — hardcoded to 48 Hz in pump.py to avoid ADC aliasing
-    CfgEntry("twelvevolt_duty", "12V pump duty cycle", "dev:pump", T_INT, 20),
     CfgEntry("reverse_dutycycle", "Reverse pump duty cycle", "dev:pump", T_BOOL, False),
-    CfgEntry("TWELVEVOLT_ENABLE", "Enable 12V power output", "dev:pump", T_BOOL, False),
     CfgEntry("log_pump_duty", "Log pump duty cycle per sample in CSV", "dev:pump", T_BOOL, False),
     # --- dev:afc ---
     CfgEntry("afc_bc_low", "AFC: BC below this = max flow (ng)", "dev:afc", T_FLOAT, 300.0),
@@ -101,7 +99,6 @@ REGISTRY = [
     CfgEntry("use_display", "Device has display", "dev:hardware", T_BOOL, False),
     # --- dev:system ---
     CfgEntry("num_channels", "Number of channels", "dev:system", T_INT, 1),
-    CfgEntry("is_ebcMeter", "Direct emission measurement mode", "dev:system", T_BOOL, False),
     CfgEntry("device_name", "Device name", "dev:system", T_STRING, "bcMeter"),
     CfgEntry("email_api_key", "Email service API key", "dev:system", T_STRING, ""),
     CfgEntry("email_service_password", "Legacy email service API key", "dev:system", T_STRING, "email_service_password"),
@@ -119,7 +116,7 @@ REGISTRY = [
 _REGISTRY_MAP = {e.key: e for e in REGISTRY}
 _SECRET_PLACEHOLDERS = {"", "configured", "email_service_password", "your_api_key", "iot_api_key"}
 DEVICE_NAME_CUSTOM_KEY = "device_name_custom"
-_AUTO_DEVICE_NAME_RE = re.compile(r"^bcMeter-[0-9A-Fa-f]{4}$")
+_AUTO_DEVICE_NAME_RE = re.compile(r"^[A-Za-z]?bcMeter-[0-9A-Fa-f]{4}$", re.IGNORECASE)
 
 
 def _hidden_entry(value, description=""):
@@ -195,7 +192,7 @@ class CfgStore:
                         if key in self._data:
                             self._data[key]["value"] = obj["value"]
                         else:
-                            # Preserve unknown keys from file
+                            # Preserve unknown keys for forward/backward compatibility.
                             self._data[key] = obj
             except Exception as e:
                 logger.error(f"Failed to load config from {self._path}: {e}")
@@ -237,7 +234,8 @@ class CfgStore:
             # Migrate existing configs: a name that is neither the bare default
             # nor this hardware's exact auto name is treated as intentional.
             inferred_custom = (
-                current_name != "bcMeter" and current_name != expected_auto_name
+                current_name != "bcMeter" and
+                _AUTO_DEVICE_NAME_RE.fullmatch(current_name) is None
             )
             self._data[DEVICE_NAME_CUSTOM_KEY]["value"] = inferred_custom
             if inferred_custom:
@@ -382,7 +380,7 @@ class CfgStore:
                 if key in self._data:
                     self._data[key]["value"] = val
                 else:
-                    # Unknown key — store it
+                    # Preserve extension keys supplied by newer/older clients.
                     reg = _REGISTRY_MAP.get(key)
                     if isinstance(val, bool):
                         t = T_BOOL
