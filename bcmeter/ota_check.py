@@ -38,6 +38,7 @@ APPLY_ERROR = 4
 
 GITHUB_REPO = "dahljo/bcmeter-pi"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASE_ASSET_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
 
 BASE_INTERVAL_S = 6 * 3600       # 6 hours
 JITTER_MAX_S = 15 * 60           # 15 minutes
@@ -91,7 +92,8 @@ def _download_text(url: str, timeout: int = 10) -> str:
 
 
 def _asset_url(asset: dict) -> str:
-    return str(asset.get("browser_download_url") or "").strip()
+    url = str(asset.get("browser_download_url") or "").strip()
+    return url if url.startswith(GITHUB_RELEASE_ASSET_PREFIX) else ""
 
 
 def _find_asset_by_name(assets: list[dict], name: str) -> dict | None:
@@ -205,8 +207,12 @@ def _resolve_release_package(data: dict) -> tuple[str, str, str]:
                 if asset and _asset_url(asset):
                     return str(asset.get("name") or name), _asset_url(asset), digest.lower()
                 if url:
-                    url_name = os.path.basename(urllib.parse.urlparse(url).path)
-                    return name or url_name, url, digest.lower()
+                    asset = next(
+                        (item for item in tar_assets if _asset_url(item) == url),
+                        None,
+                    )
+                    if asset:
+                        return str(asset.get("name") or name), url, digest.lower()
                 if tar_assets:
                     asset = tar_assets[0]
                     return str(asset.get("name") or ""), _asset_url(asset), digest.lower()
@@ -326,10 +332,17 @@ def _do_check(notify: bool = True) -> bool:
         notes_text = data.get("body", "")
         asset_name, download_url, expected_sha = _resolve_release_package(data)
 
-        if not tag or not download_url:
-            logger.warning("OTA: missing tag_name or pinned update asset in release")
+        if not tag or not download_url or not _is_hex_sha256(expected_sha):
+            logger.warning("OTA: release lacks a pinned asset with SHA256 metadata")
             with _lock:
-                _last_error = "missing release metadata"
+                _available = False
+                _version = ""
+                _notes = ""
+                _url = ""
+                _sha256 = ""
+                _asset_name = ""
+                _last_error = "missing verified release metadata"
+            _set_available_flag()
             return False
 
         current = _get_current_version()
@@ -341,10 +354,8 @@ def _do_check(notify: bool = True) -> bool:
                 _version = tag.lstrip("v")
                 _notes = notes_text[:511]
                 _url = download_url
-                _sha256 = expected_sha.lower() if _is_hex_sha256(expected_sha) else ""
+                _sha256 = expected_sha.lower()
                 _asset_name = asset_name
-                if not _sha256:
-                    _last_error = "OTA SHA256 metadata missing"
             _set_available_flag()
             incident_log.add("info", "Update available: %s -> %s", current, tag)
             logger.info("Update available: %s -> %s", current, tag)

@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import stat
 import tarfile
@@ -43,6 +44,48 @@ class PublicUpdateBoundaryTest(unittest.TestCase):
         self.assertIn("/releases/download/", url)
         self.assertEqual(actual, digest)
         self.assertNotEqual(url, data["tarball_url"])
+
+    def test_external_manifest_url_is_rejected(self):
+        digest = "ab" * 32
+        data = {
+            "assets": [{
+                "name": "version.json",
+                "browser_download_url": "https://github.com/dahljo/bcmeter-pi/releases/download/v1.6.11/version.json",
+            }],
+        }
+        manifest = json.dumps({
+            "asset": "update.tar.gz",
+            "url": "https://attacker.invalid/update.tar.gz",
+            "sha256": digest,
+        })
+        with mock.patch.object(ota_check, "_download_text", return_value=manifest):
+            self.assertEqual(ota_check._resolve_release_package(data), ("", "", ""))
+
+    def test_release_without_checksum_is_not_advertised(self):
+        release = {
+            "tag_name": "v99.0.0",
+            "body": "test",
+            "assets": [{
+                "name": "bcmeter-pi-v99.0.0.tar.gz",
+                "browser_download_url": "https://github.com/dahljo/bcmeter-pi/releases/download/v99.0.0/bcmeter-pi-v99.0.0.tar.gz",
+            }],
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(release).encode()
+
+        with mock.patch.object(ota_check.urllib.request, "urlopen", return_value=Response()):
+            self.assertFalse(ota_check._do_check(notify=False))
+        status = ota_check.get_info()
+        self.assertFalse(status["available"])
+        self.assertEqual(status["version"], "")
 
     def test_tar_path_traversal_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
