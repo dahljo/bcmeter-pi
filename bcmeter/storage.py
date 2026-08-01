@@ -245,7 +245,16 @@ class Storage:
                                     break
                     except Exception:
                         lines = 0
-                    files.append({"name": f, "size": size, "mtime": mtime, "lines": lines})
+                    files.append({
+                        "name": f,
+                        "size": size,
+                        "mtime": mtime,
+                        "lines": lines,
+                        "active": bool(
+                            self._session_active
+                            and self.session_filename == f
+                        ),
+                    })
             files.sort(key=lambda x: x["mtime"], reverse=True)
             return files
         except Exception as e:
@@ -263,6 +272,27 @@ class Storage:
         except Exception as e:
             logger.error(f"Failed to read log {filename}: {e}")
             return None
+
+    def delete_log(self, filename: str) -> bool:
+        """Delete one inactive CSV log by basename."""
+        name = str(filename or "").strip()
+        if (
+            not name.endswith(".csv")
+            or os.path.basename(name) != name
+            or ".." in name
+            or (self._session_active and self.session_filename == name)
+        ):
+            return False
+        path = os.path.join(self._log_dir, name)
+        if not os.path.isfile(path) or os.path.islink(path):
+            return False
+        try:
+            os.remove(path)
+            logger.info("Deleted log: %s", name)
+            return True
+        except OSError as exc:
+            logger.error("Failed to delete log %s: %s", name, exc)
+            return False
 
     def delete_old_logs(self, keep_count: int = 50):
         """Delete oldest logs keeping only `keep_count` files."""

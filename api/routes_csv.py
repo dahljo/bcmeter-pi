@@ -7,8 +7,10 @@ import logging
 import os
 from datetime import datetime
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+
+from .local_access import require_local_write_access
 
 logger = logging.getLogger("bcmeter.api.csv")
 
@@ -61,7 +63,8 @@ async def api_csv(file: str = Query("", description="Filename to download")):
 
     If ``file`` is specified, serve that log file.
     If ``file`` is empty, serve the current active session.
-    If no session is active, return a CSV with just the header line.
+    If no session is active, serve the newest existing log so the graph can
+    populate immediately. If no log exists, return a header-only CSV.
     """
     log_directory = _log_dir()
 
@@ -73,13 +76,30 @@ async def api_csv(file: str = Query("", description="Filename to download")):
             return PlainTextResponse("File not found", status_code=404)
     else:
         # Serve current session
-        if _storage and _storage.session_filepath and os.path.isfile(_storage.session_filepath):
+        if (
+            _storage
+            and _storage.session_active
+            and _storage.session_filepath
+            and os.path.isfile(_storage.session_filepath)
+        ):
             filepath = _storage.session_filepath
             fname = _storage.session_filename or "session.csv"
         else:
-            # No active session -- return an empty CSV with header
-            header = "No active session\n"
-            return PlainTextResponse(header, media_type="text/csv")
+            logs = _storage.list_logs() if _storage else []
+            if logs:
+                fname = logs[0]["name"]
+                filepath = os.path.join(log_directory, fname)
+            else:
+                header = (
+                    _storage.csv_header_line
+                    if _storage and hasattr(_storage, "csv_header_line")
+                    else "bcmDate;bcmTime"
+                )
+                return PlainTextResponse(
+                    header + "\n",
+                    media_type="text/csv",
+                    headers={"Cache-Control": "no-store"},
+                )
 
     # Build a descriptive download filename
     now = datetime.now()
@@ -111,7 +131,7 @@ async def api_files():
     Returns ``[{name, size, date}, ...]`` sorted newest first.
     """
     if not _storage:
-        return JSONResponse(content=[])
+        return JSONResponse(content=[], headers={"Cache-Control": "no-store"})
 
     logs = _storage.list_logs()
 
@@ -129,6 +149,28 @@ async def api_files():
             "size": entry.get("size", 0),
             "lines": entry.get("lines", 0),
             "date": date_str,
+            "active": bool(entry.get("active", False)),
         })
 
-    return JSONResponse(content=result)
+    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+
+
+@router.delete(
+    "/files",
+    dependencies=[Depends(require_local_write_access("files-delete"))],
+)
+async def api_files_delete(name: str = Query("", description="Log filename")):
+    """Delete one inactive CSV log from the operator LAN."""
+    fname = str(name or "").strip().lstrip("/")
+    if (
+        not fname
+        or not fname.endswith(".csv")
+        or os.path.basename(fname) != fname
+        or ".." in fname
+    ):
+        return PlainTextResponse("Invalid log filename", status_code=400)
+    if not _storage:
+        return PlainTextResponse("Storage not available", status_code=503)
+    if not _storage.delete_log(fname):
+        return PlainTextResponse("Log file not found or active", status_code=404)
+    return JSONResponse(content={"deleted": True})

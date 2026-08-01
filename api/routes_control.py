@@ -10,8 +10,10 @@ import threading
 import time
 from datetime import datetime
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse
+
+from .local_access import require_local_write_access
 
 logger = logging.getLogger("bcmeter.api.control")
 
@@ -119,7 +121,10 @@ def get_calibration_state() -> dict:
 # GET /api/control?action=...
 # ---------------------------------------------------------------------------
 
-@router.get("/control")
+@router.get(
+    "/control",
+    dependencies=[Depends(require_local_write_access("control"))],
+)
 async def api_control(
     action: str = Query("", description="Control action"),
     ts: int = Query(0, description="Unix timestamp for synctime"),

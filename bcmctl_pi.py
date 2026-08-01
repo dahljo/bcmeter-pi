@@ -25,7 +25,11 @@ SSH_USERS = ["bcmeter", "pi"]  # try in order
 
 def api_get(ip, path, timeout=TIMEOUT):
     try:
-        r = urlopen(f"http://{ip}{path}", timeout=timeout)
+        req = Request(
+            f"http://{ip}{path}",
+            headers={"X-bcMeter-Client": "bcmctl"},
+        )
+        r = urlopen(req, timeout=timeout)
         return r.read().decode()
     except Exception:
         return None
@@ -43,7 +47,10 @@ def api_post_json(ip, path, data, timeout=TIMEOUT):
     try:
         body = json.dumps(data).encode()
         req = Request(f"http://{ip}{path}", data=body,
-                      headers={"Content-Type": "application/json"})
+                      headers={
+                          "Content-Type": "application/json",
+                          "X-bcMeter-Client": "bcmctl",
+                      })
         r = urlopen(req, timeout=timeout)
         return r.read().decode()
     except Exception:

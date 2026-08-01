@@ -6,11 +6,12 @@ Matches the ESP32 /api/config, /api/device/rename, and /api/ap-security contract
 import json
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from bcmeter import avahi_alias
 from bcmeter.identity import hostname_from_device_name, sync_system_hostname
+from .local_access import require_local_write_access
 
 logger = logging.getLogger("bcmeter.api.config")
 
@@ -22,9 +23,25 @@ router = APIRouter()
 
 _cfg = None
 
-_SECRET_KEYS = {"email_api_key", "email_service_password", "iot_api_key"}
+_SECRET_KEYS = {
+    "ap_password",
+    "email_api_key",
+    "email_service_password",
+    "iot_api_key",
+}
 _CANONICAL_SECRET_KEYS = {"email_api_key"}
 _SECRET_PLACEHOLDERS = {"", "email_service_password", "your_api_key", "configured", "iot_api_key"}
+_MAX_CONFIG_BODY_BYTES = 64 * 1024
+_MAX_EMAIL_API_KEY_BYTES = 512
+_ANONYMOUS_PRIVATE_KEYS = {
+    "bcmeter_team_email",
+    "location_lat",
+    "location_lon",
+    "mail_logs_to",
+    "wifi_password",
+    "wifi_pwd",
+    "wifi_ssid",
+}
 
 
 def _secret_is_configured(value) -> bool:
@@ -38,6 +55,21 @@ def _mask_config_secrets(config: dict) -> dict:
         if not isinstance(entry, dict) or "value" not in entry:
             continue
         entry["value"] = "configured" if _secret_is_configured(entry.get("value")) else ""
+    return config
+
+
+def _redact_anonymous_config(config: dict) -> dict:
+    """Remove personal coordinates, addresses and network details."""
+    for key in _ANONYMOUS_PRIVATE_KEYS:
+        entry = config.get(key)
+        if not isinstance(entry, dict) or "value" not in entry:
+            continue
+        value = entry.get("value")
+        if key in {"location_lat", "location_lon"}:
+            entry["value"] = 0.0
+        else:
+            entry["value"] = "configured" if str(value or "").strip() else ""
+        entry["redacted"] = True
     return config
 
 
@@ -105,19 +137,23 @@ def _maybe_send_deferred_wifi_onboarding():
 
 @router.get("/config")
 async def api_config_get():
-    """Return full configuration JSON (same format as CfgStore.to_json)."""
+    """Return the public, consistently redacted configuration view."""
     if not _cfg:
         return JSONResponse(content={}, status_code=503)
 
-    raw = _cfg.to_json()
-    return JSONResponse(content=_mask_config_secrets(json.loads(raw)))
+    data = _mask_config_secrets(json.loads(_cfg.to_json()))
+    data = _redact_anonymous_config(data)
+    return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
 # POST /api/config
 # ---------------------------------------------------------------------------
 
-@router.post("/config")
+@router.post(
+    "/config",
+    dependencies=[Depends(require_local_write_access("config"))],
+)
 async def api_config_post(request: Request):
     """Apply configuration from JSON body.
 
@@ -129,12 +165,29 @@ async def api_config_post(request: Request):
 
     try:
         body = await request.body()
+        if len(body) > _MAX_CONFIG_BODY_BYTES:
+            return PlainTextResponse("Config body too large", status_code=413)
         body_str = body.decode("utf-8")
     except Exception as exc:
         return PlainTextResponse(f"Bad request: {exc}", status_code=400)
 
     if not body_str or not body_str.strip():
         return PlainTextResponse("No body", status_code=400)
+
+    try:
+        incoming = json.loads(body_str)
+    except json.JSONDecodeError:
+        return PlainTextResponse("Invalid JSON", status_code=400)
+    if not isinstance(incoming, dict):
+        return PlainTextResponse("Config body must be an object", status_code=400)
+    if "email_api_key" in incoming:
+        api_key = incoming["email_api_key"]
+        if isinstance(api_key, dict):
+            api_key = api_key.get("value", "")
+        if not isinstance(api_key, str):
+            return PlainTextResponse("Invalid API key", status_code=400)
+        if len(api_key.encode("utf-8")) > _MAX_EMAIL_API_KEY_BYTES:
+            return PlainTextResponse("API key too large", status_code=413)
 
     body_str = _drop_masked_secret_updates(body_str)
     ok = _cfg.apply_json(body_str)
@@ -154,7 +207,10 @@ async def api_config_post(request: Request):
 # POST /api/device/rename
 # ---------------------------------------------------------------------------
 
-@router.post("/device/rename")
+@router.post(
+    "/device/rename",
+    dependencies=[Depends(require_local_write_access("device-rename"))],
+)
 async def api_device_rename(request: Request):
     """Rename the device (update config + system hostname).
 
@@ -199,7 +255,7 @@ async def api_ap_security_get():
 
     return JSONResponse(content={
         "secured": _cfg.get_bool("ap_secured", False),
-        "password": _cfg.get_string("ap_password", "bcMeterbcMeter"),
+        "password": "",
     })
 
 
@@ -207,24 +263,42 @@ async def api_ap_security_get():
 # POST /api/ap-security
 # ---------------------------------------------------------------------------
 
-@router.post("/email/validate")
+@router.post(
+    "/email/validate",
+    dependencies=[Depends(require_local_write_access("email-validate"))],
+)
 async def api_email_validate(request: Request):
     """Validate an email service API key against the Lambda endpoint."""
     try:
-        body = await request.json()
+        raw = await request.body()
+        if len(raw) > 1024:
+            return JSONResponse(
+                content={"valid": False, "error": "Request too large"},
+                status_code=413,
+            )
+        body = json.loads(raw.decode("utf-8"))
     except Exception:
         return JSONResponse(content={"valid": False, "error": "Invalid JSON"}, status_code=400)
 
     api_key = body.get("api_key", "")
-    if not api_key:
+    if not isinstance(api_key, str) or not api_key:
         return JSONResponse(content={"valid": False, "error": "No API key provided"})
+    if len(api_key.encode("utf-8")) > _MAX_EMAIL_API_KEY_BYTES:
+        return JSONResponse(
+            content={"valid": False, "error": "API key too large"},
+            status_code=413,
+        )
 
     from bcmeter.email_handler import validate_api_key
     valid, err = validate_api_key(api_key)
-    return JSONResponse(content={"valid": valid, "error": err})
+    safe_error = str(err or "").replace(api_key, "[redacted]")[:256]
+    return JSONResponse(content={"valid": valid, "error": safe_error})
 
 
-@router.post("/ap-security")
+@router.post(
+    "/ap-security",
+    dependencies=[Depends(require_local_write_access("ap-security"))],
+)
 async def api_ap_security_post(request: Request):
     """Update AP security settings.
 

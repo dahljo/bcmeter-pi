@@ -334,6 +334,9 @@ def lab_run(
     flow:       int   = Query(0,      ge=0, le=1),
     raw:        int   = Query(1,      ge=0, le=1),
 ):
+    # The public Pi tree has no admin-auth mechanism. Raw hardware control must
+    # therefore fail closed rather than becoming available to every LAN client.
+    raise HTTPException(403, "private lab service unavailable")
     if _adc is None or _pi is None:
         raise HTTPException(500, "lab dependencies not wired")
 

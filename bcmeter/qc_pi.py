@@ -562,7 +562,11 @@ class ApiQcRunner:
         for base in [b for b in bases if b]:
             url = f"{base}{path}{query}"
             try:
-                with urllib.request.urlopen(url, timeout=timeout) as resp:
+                request = urllib.request.Request(
+                    url,
+                    headers={"X-bcMeter-Client": "bcmctl"},
+                )
+                with urllib.request.urlopen(request, timeout=timeout) as resp:
                     status = getattr(resp, "status", 200)
                     body = resp.read().decode("utf-8", errors="replace")
                     if allow_status is not None and status not in allow_status:

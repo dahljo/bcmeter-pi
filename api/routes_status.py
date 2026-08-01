@@ -17,8 +17,9 @@ import time
 import zipfile
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+
 
 logger = logging.getLogger("bcmeter.api.status")
 
@@ -197,7 +198,8 @@ async def api_status():
         data["ota_version"] = ""
         data["ota_success"] = False
 
-    return JSONResponse(content=data)
+    data["wifi_ssid"] = ""
+    return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +226,8 @@ async def api_system():
     hostname = device_name.lower().replace(" ", "-")
 
     data = {
-        "ip": _get_ip_address(),
-        "mac": _get_mac_address(),
+        "ip": "",
+        "mac": "",
         "hostname": hostname,
         "device_name": device_name,
         "adc": snap.get("adc_present", False),
@@ -274,33 +276,12 @@ async def api_system():
     try:
         from bcmeter import geoloc as _geoloc
         geo_ok, geo_lat, geo_lon = _geoloc.get_location()
-        if geo_ok:
-            lat = round(geo_lat, 6)
-            lon = round(geo_lon, 6)
-            src = _geoloc.get_source()
-            data["geoloc_lat"] = lat
-            data["geoloc_lon"] = lon
-            data["geoloc_source"] = src
-            data["geo_lat"] = lat
-            data["geo_lon"] = lon
-            data["geo_source"] = src
+        del geo_ok, geo_lat, geo_lon
     except Exception:
         pass
 
     # GPS details
-    if _gps and _gps.present:
-        try:
-            gd = _gps.get_data()
-            data["gps_valid"] = gd.valid
-            data["gps_sats"] = gd.satellites
-            data["gps_hdop"] = gd.hdop
-            if gd.valid:
-                data["gps_lat"] = gd.lat
-                data["gps_lon"] = gd.lon
-                data["gps_alt"] = gd.altitude
-                data["gps_speed"] = gd.speed
-        except Exception:
-            pass
+    # Exact GPS details are deliberately not part of the public health view.
 
     # System time
     now = datetime.now()
@@ -309,7 +290,8 @@ async def api_system():
     else:
         data["time"] = ""
 
-    return JSONResponse(content=data)
+    data.pop("baro_alt", None)
+    return JSONResponse(content=data, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
@@ -318,9 +300,7 @@ async def api_system():
 
 @router.get("/debug_mobile/status")
 async def api_debug_mobile_status():
-    """Return debug mobile progress."""
-    from bcmeter import email_handler
-    return email_handler.get_debug_mobile_status()
+    raise HTTPException(status_code=403, detail="Private diagnostics unavailable")
 
 
 @router.get("/logs")
@@ -382,7 +362,7 @@ async def api_logs():
         try:
             gd = _gps.get_data()
             if gd.valid:
-                gps_v = f"Fix: {gd.lat:.6f}, {gd.lon:.6f} ({gd.satellites} sats)"
+                gps_v = f"Fix available ({gd.satellites} sats)"
                 gps_s = "ok"
             else:
                 gps_v = f"Searching... ({gd.satellites} sats visible)"
@@ -457,8 +437,8 @@ async def api_logs():
     net = []
     wifi_mode = snap.get("wifi_mode", "sta")
     net.append({"k": "WiFi Mode", "v": wifi_mode.upper(), "s": "info"})
-    net.append({"k": "SSID", "v": snap.get("wifi_ssid", ""), "s": "info"})
-    net.append({"k": "IP", "v": _get_ip_address(), "s": "info"})
+    net.append({"k": "SSID", "v": "redacted", "s": "info"})
+    net.append({"k": "IP", "v": "redacted", "s": "info"})
     rssi = snap.get("wifi_rssi", 0)
     net.append({
         "k": "Signal",
@@ -491,8 +471,8 @@ async def api_logs():
         "measurement": meas,
         "system": sys_arr,
         "network": net,
-        "incidents": json.loads(incidents_json),
-    })
+        "incidents": [],
+    }, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +582,7 @@ def _outbox_debug_summary(errors: list[str]) -> str:
 @router.get("/maintenance-logs")
 async def api_maintenance_logs():
     """Bundle syslog and maintenance logs into a zip for debugging."""
+    raise HTTPException(status_code=403, detail="Private diagnostics unavailable")
     from bcmeter import incident_log
 
     buf = io.BytesIO()

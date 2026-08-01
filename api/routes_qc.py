@@ -99,6 +99,7 @@ def _run_qc_job(job_id: str, profile: str, calibrate: bool,
 
 @router.get("/qc/pi/report")
 async def pi_qc_report():
+    raise HTTPException(403, "private QC report unavailable")
     if not os.path.exists(LATEST_REPORT):
         raise HTTPException(404, "no Pi QC report found")
     try:
@@ -110,6 +111,7 @@ async def pi_qc_report():
 
 @router.get("/qc/pi/report.html")
 async def pi_qc_report_html():
+    raise HTTPException(403, "private QC report unavailable")
     if not os.path.exists(LATEST_HTML):
         raise HTTPException(404, "no Pi QC HTML report found")
     return FileResponse(LATEST_HTML, media_type="text/html; charset=utf-8")
@@ -122,6 +124,9 @@ async def pi_qc_start(
     send_email: bool = Query(True),
 ):
     """Start a full Pi system check in the background."""
+    # Reports and raw hardware diagnostics cannot be authenticated in this
+    # public tree, so the complete QC service remains unavailable here.
+    raise HTTPException(403, "private QC service unavailable")
     global _qc_job
     with _job_lock:
         if _qc_job and _qc_job.get("running"):
@@ -156,6 +161,7 @@ async def pi_qc_start(
 
 @router.get("/qc/pi/status")
 async def pi_qc_status():
+    raise HTTPException(403, "private QC status unavailable")
     with _job_lock:
         job = _public_job_locked()
     if job.get("started_at") and job.get("running"):

@@ -13,8 +13,10 @@ import threading
 import time
 from typing import Optional
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import PlainTextResponse
+
+from .local_access import require_local_write_access
 
 logger = logging.getLogger("bcmeter.api.update")
 
@@ -146,7 +148,10 @@ def _apply_update(archive_path: str, original_filename: str):
 # POST /api/update
 # ---------------------------------------------------------------------------
 
-@router.post("/update")
+@router.post(
+    "/update",
+    dependencies=[Depends(require_local_write_access("local-update"))],
+)
 async def api_update(
     file: Optional[UploadFile] = File(None),
     update: Optional[UploadFile] = File(None),

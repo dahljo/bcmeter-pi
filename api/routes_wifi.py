@@ -4,13 +4,14 @@ Matches the ESP32 /api/wifi/* contract.
 """
 
 import logging
-import socket
 import threading
 import time
 from datetime import datetime
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+
+from .local_access import require_local_write_access
 
 logger = logging.getLogger("bcmeter.api.wifi")
 
@@ -107,7 +108,9 @@ def _do_connect(ssid: str, password: str):
 # ---------------------------------------------------------------------------
 
 @router.get("/wifi/scan")
-async def api_wifi_scan(request: Request):
+async def api_wifi_scan(
+    request: Request,
+):
     """Return scan results matching ESP32 /api/wifi/scan contract.
 
     Pass ?refresh=1 to trigger a new scan (replaces POST /wifi/scan/refresh).
@@ -116,6 +119,7 @@ async def api_wifi_scan(request: Request):
 
     # ?refresh=1 triggers a new scan (matches ESP32 contract)
     if request.query_params.get("refresh") == "1":
+        await require_local_write_access("wifi-scan")(request)
         with _scan_lock:
             if not _scan_busy:
                 _scan_busy = True
@@ -124,19 +128,16 @@ async def api_wifi_scan(request: Request):
 
     with _scan_lock:
         scanning = _scan_busy
-        results = list(_scan_results)
 
+    # This public release intentionally has no admin-auth infrastructure.  Do
+    # not publish nearby SSIDs to every reader: provisioning remains available
+    # through the UI's manual/hidden-network field.
     networks = []
-    for net in results:
-        networks.append({
-            "ssid": net.get("ssid", ""),
-            "rssi": net.get("signal_dbm", -100),
-            "secure": bool(net.get("security", "")),
-        })
 
     return JSONResponse(content={
         "scanning": scanning,
         "networks": networks,
+        "private": True,
     })
 
 
@@ -144,7 +145,10 @@ async def api_wifi_scan(request: Request):
 # POST /api/wifi/scan/refresh
 # ---------------------------------------------------------------------------
 
-@router.post("/wifi/scan/refresh")
+@router.post(
+    "/wifi/scan/refresh",
+    dependencies=[Depends(require_local_write_access("wifi-scan"))],
+)
 async def api_wifi_scan_refresh():
     """Trigger a new WiFi scan."""
     global _scan_busy
@@ -164,7 +168,10 @@ async def api_wifi_scan_refresh():
 # POST /api/wifi
 # ---------------------------------------------------------------------------
 
-@router.post("/wifi")
+@router.post(
+    "/wifi",
+    dependencies=[Depends(require_local_write_access("wifi-save"))],
+)
 async def api_wifi_save(request: Request):
     """Save WiFi credentials.
 
@@ -193,7 +200,10 @@ async def api_wifi_save(request: Request):
 # POST /api/wifi/connect
 # ---------------------------------------------------------------------------
 
-@router.post("/wifi/connect")
+@router.post(
+    "/wifi/connect",
+    dependencies=[Depends(require_local_write_access("wifi-connect"))],
+)
 async def api_wifi_connect(request: Request):
     """Save credentials and initiate WiFi connection.
 
@@ -238,33 +248,20 @@ async def api_wifi_connect_status():
     with _conn_lock:
         state = _conn_state
         elapsed = _conn_elapsed if state != 1 else (time.time() - _conn_start_time if _conn_start_time else 0.0)
-        log_text = "".join(_conn_log)
 
-    # Determine current mode/ip/ssid
+    # Determine only the non-sensitive mode. Exact network details are not
+    # exposed by this public release.
     mode = "none"
-    ip = ""
-    ssid = ""
     if _nm:
         try:
             cur_ssid = _nm.get_current_network()
             is_connected = _nm.is_connected()
             if is_connected and cur_ssid:
                 mode = "sta"
-                ssid = cur_ssid
             else:
                 mode = "ap"
         except Exception:
             pass
-
-        try:
-            s = __import__("socket")
-            sock = s.socket(s.AF_INET, s.SOCK_DGRAM)
-            sock.settimeout(0.5)
-            sock.connect(("8.8.8.8", 80))
-            ip = sock.getsockname()[0]
-            sock.close()
-        except Exception:
-            ip = "192.168.18.8" if mode == "ap" else ""
 
     # Include device name and hostname so the UI can show the .local address
     import socket as _sock
@@ -274,10 +271,10 @@ async def api_wifi_connect_status():
     return JSONResponse(content={
         "state": state,
         "elapsed": round(elapsed, 1),
-        "log": log_text,
+        "log": "",
         "mode": mode,
-        "ip": ip,
-        "ssid": ssid,
+        "ip": "",
+        "ssid": "",
         "device_name": device_name,
         "hostname": hostname,
     })
@@ -311,16 +308,6 @@ async def api_wifi_status():
     else:
         quality = 0
 
-    # Determine IP
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0.5)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-    except Exception:
-        ip = "192.168.18.8" if mode == "ap" else ""
-
     # Connection status string
     if internet:
         status = "connected"
@@ -332,8 +319,8 @@ async def api_wifi_status():
     return JSONResponse(content={
         "mode": mode,
         "status": status,
-        "ssid": ssid,
-        "ip": ip,
+        "ssid": "",
+        "ip": "",
         "rssi": rssi,
         "quality": quality,
         "internet": internet,
@@ -345,7 +332,10 @@ async def api_wifi_status():
 # POST /api/wifi/delete
 # ---------------------------------------------------------------------------
 
-@router.post("/wifi/delete")
+@router.post(
+    "/wifi/delete",
+    dependencies=[Depends(require_local_write_access("wifi-delete"))],
+)
 async def api_wifi_delete():
     """Delete WiFi credentials and switch to AP mode."""
     if not _nm:
