@@ -89,6 +89,29 @@ class WarmupRecoveryTests(unittest.TestCase):
         self.assertEqual(fake.get("warmup_progress"), 0)
         self.assertEqual(fake.get("warmup_started_monotonic"), 0.0)
 
+    @unittest.skipUnless(_FASTAPI_AVAILABLE, "FastAPI test dependencies are not installed")
+    def test_duplicate_start_preserves_active_warmup_state(self):
+        fake = _FakeState(
+            sampling=True,
+            error=ErrorCode.ERR_NONE,
+            warning_msg="Filter heavily loaded",
+            warmup_started_monotonic=100.0,
+            warmup_end_monotonic=700.0,
+            warmup_progress=42,
+        )
+        with patch.object(routes_control, "_state", fake), patch.object(
+            routes_control, "_cfg", None
+        ), patch.object(routes_control, "_engine", None):
+            response = routes_control._handle_start(force=True, indoor="1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body, b"Sampling already running")
+        self.assertTrue(fake.sampling)
+        self.assertEqual(fake.get("warning_msg"), "Filter heavily loaded")
+        self.assertEqual(fake.get("warmup_started_monotonic"), 100.0)
+        self.assertEqual(fake.get("warmup_end_monotonic"), 700.0)
+        self.assertEqual(fake.get("warmup_progress"), 42)
+
     def test_engine_clears_warning_for_autostart_before_preflight(self):
         engine = MeasureEngine(
             cfg=_FakeConfig(), adc=_FakeADC(), optics=object(), pump=object(),

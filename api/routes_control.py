@@ -221,6 +221,12 @@ def _handle_start(force: bool, indoor: str = "") -> PlainTextResponse:
     "1" → indoor session, "0" → explicit outdoor, empty → no change.
     Set before time-sync / calibration guards so retries preserve it.
     """
+    # Start is idempotent.  A duplicate UI/API request must not clear the
+    # active session's warm-up timestamps or warning state; those values are
+    # the evidence shown while warming up and after a warm-up failure.
+    if _state is not None and _state.sampling:
+        return PlainTextResponse("Sampling already running")
+
     # Apply indoor override early, before any guard can bail out.
     if indoor in ("0", "1") and _engine is not None:
         _engine.set_next_session_indoor(indoor == "1")
