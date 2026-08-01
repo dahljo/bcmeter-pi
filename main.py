@@ -317,7 +317,7 @@ def main():
     set_dependencies(
         cfg=cfg, state_mgr=state, engine=engine, storage=storage,
         network_manager=network_mgr, gps=gps, status_led=status_led,
-        pi=pi, adc=adc, optics=optics, pump=pump,
+        pump=pump,
     )
 
     # ── Start background threads ───────────────────────────

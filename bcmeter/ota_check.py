@@ -6,23 +6,26 @@ followed by systemd service restart. Not binary flashing.
 """
 
 import hashlib
+import hmac
 import json
 import logging
 import os
 import random
+import re
 import shutil
 import socket
 import subprocess
-import tarfile
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from enum import IntEnum
 
 from . import incident_log, email_handler
 from .state import state
+from .update_package import copy_update_items, safe_extract_archive, select_source_root
 
 logger = logging.getLogger("bcmeter.ota_check")
 
@@ -62,6 +65,7 @@ _version = ""
 _notes = ""
 _url = ""
 _sha256 = ""
+_asset_name = ""
 _apply_state = APPLY_IDLE
 _apply_progress = 0
 _apply_error = ""
@@ -73,6 +77,148 @@ _success_old_version = ""
 _success_new_version = ""
 _success_at = 0.0
 _lock = threading.Lock()
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _is_hex_sha256(value: str) -> bool:
+    return bool(_SHA256_RE.match(str(value or "").strip()))
+
+
+def _download_text(url: str, timeout: int = 10) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "bcMeter/2.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read(256 * 1024).decode("utf-8", errors="replace")
+
+
+def _asset_url(asset: dict) -> str:
+    return str(asset.get("browser_download_url") or "").strip()
+
+
+def _find_asset_by_name(assets: list[dict], name: str) -> dict | None:
+    wanted = os.path.basename(str(name or "").strip())
+    if not wanted:
+        return None
+    for asset in assets:
+        if os.path.basename(str(asset.get("name") or "")) == wanted:
+            return asset
+    return None
+
+
+def _tarball_assets(assets: list[dict]) -> list[dict]:
+    result = []
+    for asset in assets:
+        name = str(asset.get("name") or "").lower()
+        if name.endswith((".tar.gz", ".tgz")) and _asset_url(asset):
+            result.append(asset)
+    return result
+
+
+def _manifest_candidates(manifest) -> list[dict]:
+    candidates = []
+    if isinstance(manifest, dict):
+        candidates.append(manifest)
+        for key in ("firmware", "ota", "update", "package"):
+            if isinstance(manifest.get(key), dict):
+                candidates.append(manifest[key])
+        if isinstance(manifest.get("assets"), list):
+            candidates.extend(x for x in manifest["assets"] if isinstance(x, dict))
+    return candidates
+
+
+def _first_value(data: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = data.get(key)
+        if value is not None:
+            return str(value).strip()
+    return ""
+
+
+def _parse_sha256sums(text: str, asset_name: str, allow_single: bool = False) -> str:
+    wanted = os.path.basename(asset_name)
+    single_hash = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.replace("*", " ").split()
+        if parts and _is_hex_sha256(parts[0]):
+            if len(parts) == 1:
+                single_hash = parts[0].lower()
+                continue
+            if os.path.basename(parts[-1]) == wanted:
+                return parts[0].lower()
+        if line.startswith("SHA256 (") and ") =" in line:
+            name = line.split("SHA256 (", 1)[1].split(")", 1)[0]
+            digest = line.rsplit("=", 1)[-1].strip()
+            if os.path.basename(name) == wanted and _is_hex_sha256(digest):
+                return digest.lower()
+    return single_hash if allow_single and _is_hex_sha256(single_hash) else ""
+
+
+def _sha_from_release_assets(assets: list[dict], tar_asset: dict) -> str:
+    tar_name = str(tar_asset.get("name") or "")
+    tar_lower = tar_name.lower()
+    for asset in assets:
+        name = str(asset.get("name") or "")
+        lower = name.lower()
+        if not _asset_url(asset):
+            continue
+        sums_asset = lower in ("sha256sums", "sha256sums.txt", "checksums.txt")
+        sidecar_asset = lower in (f"{tar_lower}.sha256", f"{tar_lower}.sha256.txt")
+        if sums_asset or sidecar_asset:
+            try:
+                digest = _parse_sha256sums(
+                    _download_text(_asset_url(asset)),
+                    tar_name,
+                    allow_single=sidecar_asset,
+                )
+            except Exception as exc:
+                logger.warning("OTA: could not read %s: %s", name, exc)
+                continue
+            if digest:
+                return digest
+    return ""
+
+
+def _resolve_release_package(data: dict) -> tuple[str, str, str]:
+    """Return (asset_name, download_url, sha256) for a pinned release asset."""
+    assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+    tar_assets = _tarball_assets(assets)
+
+    manifest_asset = _find_asset_by_name(assets, "version.json")
+    if manifest_asset and _asset_url(manifest_asset):
+        try:
+            manifest = json.loads(_download_text(_asset_url(manifest_asset)))
+        except Exception as exc:
+            logger.warning("OTA: could not parse version.json: %s", exc)
+        else:
+            for candidate in _manifest_candidates(manifest):
+                digest = _first_value(candidate, ("sha256", "sha_256", "hash"))
+                if not _is_hex_sha256(digest):
+                    continue
+                name = _first_value(candidate, ("asset", "filename", "file", "name"))
+                url = _first_value(
+                    candidate,
+                    ("browser_download_url", "download_url", "url"),
+                )
+                asset = _find_asset_by_name(assets, name) if name else None
+                if asset and _asset_url(asset):
+                    return str(asset.get("name") or name), _asset_url(asset), digest.lower()
+                if url:
+                    url_name = os.path.basename(urllib.parse.urlparse(url).path)
+                    return name or url_name, url, digest.lower()
+                if tar_assets:
+                    asset = tar_assets[0]
+                    return str(asset.get("name") or ""), _asset_url(asset), digest.lower()
+
+    if tar_assets:
+        asset = tar_assets[0]
+        return (
+            str(asset.get("name") or ""),
+            _asset_url(asset),
+            _sha_from_release_assets(assets, asset),
+        )
+    return "", "", ""
 
 
 def _get_current_version() -> str:
@@ -158,7 +304,7 @@ def _set_available_flag():
 
 def _do_check(notify: bool = True) -> bool:
     """Fetch latest GitHub release and update state."""
-    global _available, _skipped, _version, _notes, _url, _sha256
+    global _available, _skipped, _version, _notes, _url, _sha256, _asset_name
     global _checking, _last_checked_at, _last_error
 
     logger.info("Checking for updates...")
@@ -178,10 +324,10 @@ def _do_check(notify: bool = True) -> bool:
 
         tag = data.get("tag_name", "")
         notes_text = data.get("body", "")
-        tarball_url = data.get("tarball_url", "")
+        asset_name, download_url, expected_sha = _resolve_release_package(data)
 
-        if not tag or not tarball_url:
-            logger.warning("OTA: missing tag_name or tarball_url in release")
+        if not tag or not download_url:
+            logger.warning("OTA: missing tag_name or pinned update asset in release")
             with _lock:
                 _last_error = "missing release metadata"
             return False
@@ -194,8 +340,11 @@ def _do_check(notify: bool = True) -> bool:
                 _available = True
                 _version = tag.lstrip("v")
                 _notes = notes_text[:511]
-                _url = tarball_url
-                _sha256 = ""  # GitHub releases don't include SHA256
+                _url = download_url
+                _sha256 = expected_sha.lower() if _is_hex_sha256(expected_sha) else ""
+                _asset_name = asset_name
+                if not _sha256:
+                    _last_error = "OTA SHA256 metadata missing"
             _set_available_flag()
             incident_log.add("info", "Update available: %s -> %s", current, tag)
             logger.info("Update available: %s -> %s", current, tag)
@@ -208,6 +357,7 @@ def _do_check(notify: bool = True) -> bool:
                 _notes = ""
                 _url = ""
                 _sha256 = ""
+                _asset_name = ""
             _set_available_flag()
             logger.info("Up to date (%s)", current)
         return True
@@ -241,10 +391,14 @@ def _apply():
     with _lock:
         url = _url
         expected_hash = _sha256
+        asset_name = _asset_name
         update_available = _available and not _skipped
 
     if not update_available or not url:
         _set_apply_error("No update available after refresh")
+        return
+    if not _is_hex_sha256(expected_hash):
+        _set_apply_error("OTA SHA256 metadata missing")
         return
 
     logger.info("Downloading from %s", url)
@@ -254,6 +408,7 @@ def _apply():
         _apply_progress = 0
 
     tmp_path = None
+    extract_dir = None
     try:
         # Download the tarball
         req = urllib.request.Request(
@@ -277,14 +432,12 @@ def _apply():
 
         logger.info("Downloaded %d bytes", written)
 
-        # Verify SHA256 if available
-        if expected_hash:
-            computed = sha.hexdigest()
-            if computed.lower() != expected_hash.lower():
-                logger.error("SHA256 mismatch! expected=%s computed=%s", expected_hash, computed)
-                _set_apply_error("SHA256 mismatch")
-                return
-            logger.info("SHA256 verified OK")
+        computed = sha.hexdigest()
+        if not hmac.compare_digest(computed.lower(), expected_hash.lower()):
+            logger.error("SHA256 mismatch! expected=%s computed=%s", expected_hash, computed)
+            _set_apply_error("SHA256 mismatch")
+            return
+        logger.info("SHA256 verified OK")
 
         # Extract
         with _lock:
@@ -292,38 +445,21 @@ def _apply():
             _apply_progress = 60
 
         extract_dir = tempfile.mkdtemp(prefix="bcmeter_ota_extract_")
-        with tarfile.open(tmp_path, "r:gz") as tar:
-            tar.extractall(path=extract_dir)
-
-        # Determine source root (GitHub tarballs have a single top-level dir)
-        entries = os.listdir(extract_dir)
-        if len(entries) == 1 and os.path.isdir(os.path.join(extract_dir, entries[0])):
-            src_dir = os.path.join(extract_dir, entries[0])
-        else:
-            src_dir = extract_dir
+        archive_name = asset_name or os.path.basename(urllib.parse.urlparse(url).path)
+        safe_extract_archive(tmp_path, archive_name, extract_dir)
+        src_dir = select_source_root(extract_dir)
 
         with _lock:
             _apply_progress = 80
 
-        # Copy files into CODE_DIR
-        for item in os.listdir(src_dir):
-            if item in _PRESERVE_RUNTIME_ITEMS or item.startswith(".upgrade_backup_"):
-                logger.info("Preserving runtime item during OTA: %s", item)
-                continue
-            src = os.path.join(src_dir, item)
-            dst = os.path.join(CODE_DIR, item)
-            if os.path.isdir(src):
-                if os.path.exists(dst):
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy2(src, dst)
+        copy_update_items(src_dir, CODE_DIR, _PRESERVE_RUNTIME_ITEMS, logger=logger)
 
         incident_log.add("ok", "OTA update extracted to %s", CODE_DIR)
         logger.info("Update files extracted to %s", CODE_DIR)
 
         # Cleanup
         shutil.rmtree(extract_dir, ignore_errors=True)
+        extract_dir = None
 
         with _lock:
             _apply_progress = 100
@@ -340,6 +476,8 @@ def _apply():
         logger.exception("OTA apply failed: %s", e)
         _set_apply_error(str(e))
     finally:
+        if extract_dir:
+            shutil.rmtree(extract_dir, ignore_errors=True)
         if tmp_path:
             try:
                 os.remove(tmp_path)

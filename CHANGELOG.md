@@ -6,6 +6,9 @@
 - Reset stale measurement errors, warnings, filter state, and warm-up state when a new session begins.
 - Report authoritative warm-up progress through `/api/status`, including the frozen progress at which an error stopped a session.
 - Keep the 65°C emergency cutoff unchanged; it is already above the 60°C rated operating maximum of optional D6F and SPS30 peripherals.
+- Remove private QC, lab-control, maintenance CLI, and arbitrary archive-upload surfaces from the public DIY tree.
+- Require a SHA-256-pinned GitHub Release asset and path-safe extraction for OTA updates.
+- Store configuration and WiFi credential files atomically with owner-only permissions.
 
 ## v1.6.10
 

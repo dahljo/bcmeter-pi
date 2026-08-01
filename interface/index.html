@@ -246,7 +246,6 @@
 <h6 class="text-center">System Operations</h6><hr>
 <button class="btn btn-warning btn-block mb-2" onclick="confirmAction('reboot')">Reboot Device</button>
 <button class="btn btn-danger btn-block mb-2" onclick="confirmAction('shutdown')">Shutdown Device</button>
-<button class="btn btn-dark btn-block mb-2" onclick="openOtaIfDirect()">Update Firmware</button>
 <hr>
 <button class="btn btn-danger btn-block" onclick="showFactoryResetModal()">&#9888; Factory Reset</button>
 </div>
@@ -464,26 +463,6 @@ Once connected, the captive window closes instantly. Right-click or long-tap <a 
 <p style="color:#dc3545;font-weight:600" id="startupErrorMsg"></p>
 <button class="btn btn-secondary mt-2" onclick="hideModal('startup')">Close</button>
 </div>
-</div>
-</div>
-</div>
-<div class="modal" id="otaUpdateModal">
-<div class="modal-content mw-400">
-<div class="modal-header"><h5>Software Update</h5><button class="close" onclick="hideModal('otaUpdate')">&times;</button></div>
-<div class="modal-body text-center">
-<p class="text-muted mb-3">Select the update archive (<b>.tar.gz</b>).</p>
-<input type="file" id="otaFile" accept=".tar.gz,.tgz" class="form-control mb-3">
-<div id="otaProgress" style="display:none">
-<div class="progress-track progress-track-lg">
-<div id="otaBar" class="progress-bar" style="background:#343a40"></div>
-</div>
-<small id="otaStatus" class="text-muted">Uploading...</small>
-</div>
-</div>
-<div class="modal-footer">
-<button class="btn btn-secondary" onclick="hideModal('otaUpdate')">Cancel</button>
-<button class="btn btn-dark" onclick="doOtaUpdate()" id="otaBtn">Install Update</button>
-<button class="btn btn-primary" onclick="location.reload()" id="otaReloadBtn" style="display:none">Reload Page</button>
 </div>
 </div>
 </div>
@@ -3557,17 +3536,6 @@ c2.textContent=s.observed||'';
 });
 }
 /* -------------------------------- */
-var otaRebootTimer=null;
-var otaReachabilityTimer=null;
-var otaRebootStarted=false;
-var otaReloadTriggered=false;
-var otaPollInFlight=false;
-var otaSawOffline=false;
-function clearOtaTimers(){
-if(otaRebootTimer){clearInterval(otaRebootTimer);otaRebootTimer=null;}
-if(otaReachabilityTimer){clearInterval(otaReachabilityTimer);otaReachabilityTimer=null;}
-otaPollInFlight=false;
-}
 var OTA_PENDING_KEY='bcmeterOtaPendingVersion';
 var OTA_SUCCESS_SEEN_KEY='bcmeterOtaSuccessSeenVersion';
 function rememberOtaPending(version){
@@ -3588,134 +3556,6 @@ forgetOtaPending();
 try{localStorage.setItem(OTA_SUCCESS_SEEN_KEY,successKey);}catch(e){}
 if($('otaSuccessVersion'))$('otaSuccessVersion').textContent=ver||pending||'--';
 showModal('otaSuccess');
-}
-function triggerOtaReload(){
-if(otaReloadTriggered) return;
-otaReloadTriggered=true;
-clearOtaTimers();
-if(otaWifiMode==='ap'){
-$('otaBar').style.width='100%';
-$('otaBar').style.background='#ffc107';
-$('otaBar').style.transition='none';
-$('otaStatus').innerHTML='<b>Reconnect to hotspot &ldquo;'+otaApSsid+'&rdquo;</b><br><span style="font-weight:normal">bcMeter restarted. Your device connected back to its previous network — reconnect to the bcMeter hotspot, then reload this page.</span>';
-$('otaBtn').style.display='none';
-$('otaReloadBtn').style.display='';
-} else {
-location.reload();
-}
-}
-function startOtaRebootCountdown(){
-if(otaRebootStarted) return;
-otaRebootStarted=true;
-otaReloadTriggered=false;
-otaSawOffline=false;
-otaPollInFlight=false;
-var totalMs=30000;
-var startMs=Date.now();
-var bar=$('otaBar');
-var status=$('otaStatus');
-clearOtaTimers();
-bar.style.transition='width .25s linear';
-bar.style.background='#17a2b8';
-bar.style.width='0%';
-function pollReachability(){
-if(otaPollInFlight||otaReloadTriggered) return;
-otaPollInFlight=true;
-fetch('/api/status?ota_ping='+Date.now(), {cache:'no-store'})
-.then(function(r){
-otaPollInFlight=false;
-if(!r.ok) throw new Error('HTTP '+r.status);
-var elapsed=Date.now()-startMs;
-if(otaSawOffline||elapsed>=6000){
-triggerOtaReload();
-}
-})
-.catch(function(){
-otaPollInFlight=false;
-otaSawOffline=true;
-});
-}
-function tick(){
-var elapsed=Math.max(0, Date.now()-startMs);
-var pct=Math.min(100, (elapsed*100)/totalMs);
-var remSec=Math.max(0, Math.ceil((totalMs-elapsed)/1000));
-bar.style.width=pct+'%';
-status.textContent='Restarting and reconnecting... '+remSec+'s';
-if(elapsed>=totalMs){
-triggerOtaReload();
-}
-}
-tick();
-pollReachability();
-otaReachabilityTimer=setInterval(pollReachability,1000);
-otaRebootTimer=setInterval(tick,200);
-}
-function resetOtaUiAfterError(msg){
-clearOtaTimers();
-forgetOtaPending();
-otaRebootStarted=false;
-otaReloadTriggered=false;
-otaSawOffline=false;
-$('otaBtn').disabled=false;
-$('otaProgress').style.display='none';
-alert(msg);
-}
-var otaWifiMode=null,otaApSsid=null;
-function openOtaIfDirect(){
-fetch('/api/status').then(r=>r.json()).then(d=>{
-otaWifiMode=d.wifi_mode||'sta';
-otaApSsid=d.wifi_ssid||'bcMeter';
-}).catch(function(){otaWifiMode='sta';});
-showModal('otaUpdate');
-}
-function doOtaUpdate() {
-const fileInput=document.getElementById('otaFile');
-if(fileInput.files.length===0){alert('Please select a file');return;}
-if(!confirm('Install "'+fileInput.files[0].name+'" on the device?\nbcMeter will restart after the update.'))return;
-const file=fileInput.files[0];
-const formData=new FormData();
-formData.append('file',file);
-rememberOtaPending('manual');
-otaRebootStarted=false;
-otaReloadTriggered=false;
-otaSawOffline=false;
-clearOtaTimers();
-$('otaBtn').disabled=true;
-$('otaProgress').style.display='block';
-$('otaBar').style.transition='width .2s';
-$('otaBar').style.background='#343a40';
-$('otaBar').style.width='0%';
-$('otaStatus').textContent='Uploading: 0%';
-let uploadFinished=false;
-const xhr=new XMLHttpRequest();
-xhr.open('POST','/api/update',true);
-setLocalXHRHeader(xhr);
-xhr.upload.onprogress=(e)=>{
-if(!e.lengthComputable) return;
-const pct=(e.loaded/e.total)*100;
-$('otaBar').style.width=pct+'%';
-$('otaStatus').textContent='Uploading: '+Math.round(pct)+'%';
-};
-xhr.upload.onloadend=()=>{
-uploadFinished=true;
-$('otaBar').style.width='100%';
-$('otaStatus').textContent='Upload complete. Waiting for restart...';
-startOtaRebootCountdown();
-};
-xhr.onload=()=>{
-if(xhr.status===200){
-startOtaRebootCountdown();
-return;
-}
-resetOtaUiAfterError('Update failed: '+(xhr.responseText||('HTTP '+xhr.status)));
-};
-xhr.onerror=()=>{
-if(!uploadFinished) resetOtaUiAfterError('Update failed: network error during upload');
-};
-xhr.onabort=()=>{
-if(!uploadFinished) resetOtaUiAfterError('Update aborted');
-};
-xhr.send(formData);
 }
 var _obCheckTimer=null,_obCheckAttempts=0;
 function _cfgValue(cfg,key,def){
@@ -3879,7 +3719,7 @@ var s=d.apply_state,p=d.apply_progress||0;
 if(s===1){$('otaAvailBar').style.width=Math.max(p,5)+'%';$('otaAvailApplyStatus').textContent='Downloading\u2026 '+p+'%';}
 else if(s===2){$('otaAvailBar').style.width='90%';$('otaAvailApplyStatus').textContent='Installing update\u2026';}
 else if(s===3){finishOtaAvailableApply();}
-else if(s===4){forgetOtaPending();clearInterval(otaAvailPollTimer);otaAvailPollTimer=null;$('otaAvailApplyStatus').textContent=(d.apply_error||'Update failed')+'. Try the manual update option.';$('otaAvailSkipBtn').style.display='';}
+else if(s===4){forgetOtaPending();clearInterval(otaAvailPollTimer);otaAvailPollTimer=null;$('otaAvailApplyStatus').textContent=d.apply_error||'Update failed';$('otaAvailSkipBtn').style.display='';}
 else{checkOtaInstalled(targetVersion,startedAt,d);}
 }).catch(function(){$('otaAvailApplyStatus').textContent='Restarting service...';});},1000);
 }
@@ -3895,7 +3735,7 @@ $('otaAvailBar').style.width='5%';
 $('otaAvailApplyStatus').textContent='Starting download...';
 pollOtaAvailableApply(targetVersion,startedAt);
 fetch('/api/ota/apply',{method:'POST'}).then(function(r){
-if(!r.ok){forgetOtaPending();$('otaAvailApplyStatus').textContent='Failed to start update. Try the manual update option.';}
+if(!r.ok){forgetOtaPending();$('otaAvailApplyStatus').textContent='Failed to start update.';}
 }).catch(function(){$('otaAvailApplyStatus').textContent='Restarting service...';});}
 window.onload=()=>{
 document.documentElement.style.setProperty('--vh', window.innerHeight*0.01+'px');

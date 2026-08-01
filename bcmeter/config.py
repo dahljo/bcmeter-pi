@@ -258,19 +258,42 @@ class CfgStore:
 
         if migrated:
             self.save()
+        else:
+            self._ensure_secure_permissions()
+
+    def _ensure_secure_permissions(self):
+        """Keep the secret-bearing config readable only by its owner."""
+        try:
+            if os.path.exists(self._path):
+                os.chmod(self._path, 0o600)
+        except OSError as exc:
+            logger.error("Failed to secure config permissions: %s", exc)
 
     def save(self):
         """Persist current config to JSON file."""
         with self._lock:
             tmp = self._path + ".tmp"
+            fd = None
             try:
-                with open(tmp, "w") as f:
+                directory = os.path.dirname(os.path.abspath(self._path)) or "."
+                os.makedirs(directory, exist_ok=True)
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    fd = None
                     json.dump(self._data, f, indent=4)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(tmp, 0o600)
                 os.replace(tmp, self._path)
+                os.chmod(self._path, 0o600)
+                return True
             except Exception as e:
                 logger.error(f"Failed to save config: {e}")
+                if fd is not None:
+                    os.close(fd)
                 if os.path.exists(tmp):
                     os.remove(tmp)
+                return False
 
     def get(self, key: str, default=None):
         """Get the value of a config key."""

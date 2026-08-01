@@ -134,22 +134,39 @@ class NetworkManager:
 
     def save_credentials(self, ssid, password):
         """Persist WiFi credentials to bcMeter_wifi.json."""
-        try:
-            with open(self._credentials_file, "w") as fh:
-                json.dump({"wifi_ssid": ssid, "wifi_pwd": password}, fh, indent=2)
-            os.chmod(self._credentials_file, 0o666)
+        if self._write_credentials({"wifi_ssid": ssid, "wifi_pwd": password}):
             logger.info("WiFi credentials saved for SSID=%s", ssid)
+
+    def _write_credentials(self, data):
+        """Atomically persist owner-readable WiFi credentials."""
+        tmp = self._credentials_file + ".tmp"
+        fd = None
+        try:
+            os.makedirs(os.path.dirname(self._credentials_file), exist_ok=True)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fd = None
+                json.dump(data, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self._credentials_file)
+            os.chmod(self._credentials_file, 0o600)
+            return True
         except Exception as exc:
             logger.error("Failed to save WiFi credentials: %s", exc)
+            if fd is not None:
+                os.close(fd)
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            return False
 
     def delete_credentials(self):
         """Clear stored WiFi credentials."""
-        try:
-            with open(self._credentials_file, "w") as fh:
-                fh.write('{\n\t"wifi_ssid": "",\n\t"wifi_pwd": ""\n}')
-            os.chmod(self._credentials_file, 0o666)
-        except Exception as exc:
-            logger.error("Failed to delete WiFi credentials: %s", exc)
+        self._write_credentials({"wifi_ssid": "", "wifi_pwd": ""})
         logger.debug("WiFi credentials cleared")
 
     @staticmethod

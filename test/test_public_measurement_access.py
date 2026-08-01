@@ -14,8 +14,6 @@ try:
         routes_config,
         routes_control,
         routes_csv,
-        routes_lab,
-        routes_qc,
         routes_status,
         routes_wifi,
     )
@@ -92,7 +90,6 @@ class PublicMeasurementAccessPolicyTest(unittest.TestCase):
         config = _route_decorators(ROOT / "api" / "routes_config.py")
         control = _route_decorators(ROOT / "api" / "routes_control.py")
         status = _route_decorators(ROOT / "api" / "routes_status.py")
-        qc = _route_decorators(ROOT / "api" / "routes_qc.py")
 
         self.assertIsNone(config[("GET", "/config")])
         # Routine writes use origin/client-intent protection only. The public
@@ -108,9 +105,6 @@ class PublicMeasurementAccessPolicyTest(unittest.TestCase):
         self.assertIsNone(status[("GET", "/logs")])
         self.assertIsNone(status[("GET", "/maintenance-logs")])
         self.assertIsNone(status[("GET", "/debug_mobile/status")])
-        self.assertIsNone(qc[("GET", "/qc/pi/report")])
-        self.assertIsNone(qc[("GET", "/qc/pi/report.html")])
-        self.assertIsNone(qc[("GET", "/qc/pi/status")])
 
         config_source = (ROOT / "api" / "routes_config.py").read_text()
         status_source = (ROOT / "api" / "routes_status.py").read_text()
@@ -154,7 +148,6 @@ class PublicMeasurementAccessPolicyTest(unittest.TestCase):
                 ("POST", "/ota/skip"),
                 ("POST", "/ota/apply"),
             ],
-            "routes_update.py": [("POST", "/update")],
             "routes_wifi.py": [
                 ("POST", "/wifi/scan/refresh"),
                 ("POST", "/wifi"),
@@ -172,11 +165,24 @@ class PublicMeasurementAccessPolicyTest(unittest.TestCase):
                 )
 
         # No credential system exists in this public tree. Raw lab/QC/service
-        # endpoints are therefore disabled, not downgraded to local-public.
-        lab_source = (ROOT / "api" / "routes_lab.py").read_text()
-        qc_source = (ROOT / "api" / "routes_qc.py").read_text()
-        self.assertIn("private lab service unavailable", lab_source)
-        self.assertIn("private QC service unavailable", qc_source)
+        # endpoints and arbitrary archive upload are omitted completely.
+        for relative in (
+            "api/routes_lab.py",
+            "api/routes_qc.py",
+            "api/routes_update.py",
+            "bcmctl_pi.py",
+            "bcmeter-qc.py",
+            "bcmeter/qc_html.py",
+            "bcmeter/qc_pi.py",
+        ):
+            self.assertFalse((ROOT / relative).exists(), relative)
+        app_source = (ROOT / "api" / "app.py").read_text()
+        self.assertNotIn("routes_lab", app_source)
+        self.assertNotIn("routes_qc", app_source)
+        self.assertNotIn("routes_update", app_source)
+        interface = (ROOT / "interface" / "index.html").read_text()
+        self.assertNotIn("/api/update", interface)
+        self.assertNotIn("otaUpdateModal", interface)
 
     def test_csv_notes_are_machine_status_codes_not_user_annotations(self):
         api_source = "\n".join(
@@ -279,8 +285,6 @@ class PublicReadRedactionApiTest(unittest.TestCase):
         app.include_router(routes_config.router, prefix="/api")
         app.include_router(routes_control.router, prefix="/api")
         app.include_router(routes_csv.router, prefix="/api")
-        app.include_router(routes_lab.router, prefix="/api")
-        app.include_router(routes_qc.router, prefix="/api")
         app.include_router(routes_status.router, prefix="/api")
         app.include_router(routes_wifi.router, prefix="/api")
         self.client = TestClient(app)

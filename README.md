@@ -40,8 +40,12 @@ sudo bash install.sh
 
 - `install.sh` — Bootstrap wrapper for fresh Raspberry Pi OS Lite installs; it downloads/updates the installer and runs it inside `screen`.
 - `install.py` — Main installer/updater used by the image, manual installs, OTA updates, and v1-to-v2 migrations.
-- `bcmctl_pi.py` — LAN maintenance CLI for discovering Pi devices, checking status, starting/stopping measurement, syncing time, downloading CSV files, and pushing controlled updates.
-- `bcmeter-qc.py` — On-device QC entry point that runs the Raspberry Pi bcMeter quality-check workflow through the local API.
+
+Private production, QC, lab-control, deployment, and credential-provisioning
+tools are deliberately maintained outside this public DIY repository. The
+device accepts updates only from the fixed GitHub Releases channel with a
+mandatory SHA-256 digest and safe archive extraction; arbitrary archive upload
+is not part of the public API. See [SECURITY.md](SECURITY.md).
 
 ## License
 

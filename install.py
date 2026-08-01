@@ -1450,6 +1450,9 @@ def main():
 
 	run_cmd(f"chown -R {app_user}:{app_user} {BASE_DIR}", shell=True, ignore_error=True)
 	run_cmd(f"chmod -R u+rwX,go+rX,go-w {BASE_DIR}", shell=True, ignore_error=True)
+	for secret_file in (BASE_DIR / "bcMeter_config.json", BASE_DIR / "bcMeter_wifi.json"):
+		if secret_file.exists():
+			secret_file.chmod(0o600)
 
 	if is_chroot_mode(mode):
 		log("Chroot install complete.")
