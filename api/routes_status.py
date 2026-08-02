@@ -58,6 +58,18 @@ def _get_version() -> str:
         return "2.0.0"
 
 
+def _get_product_class() -> str:
+    """Return the immutable class compiled into this public Pi runtime."""
+    try:
+        from bcmeter import __product_class__
+        value = str(__product_class__).strip().lower()
+        if value == "bcmeter":
+            return value
+    except Exception:
+        pass
+    return "unknown"
+
+
 def _get_memory_info() -> dict:
     """Return memory usage dict.  Prefers psutil, falls back to /proc/meminfo."""
     try:
@@ -183,6 +195,8 @@ async def api_status():
         "time_synced": datetime.now().year > 2024,
         "last_cal": _cfg.get_string("last_cal_time", "never") if _cfg else "never",
         "version": _get_version(),
+        "platform": "pi",
+        "product_class": _get_product_class(),
         "env": "pi",
     }
 
@@ -253,6 +267,9 @@ async def api_system():
         "wifi_status": "connected" if snap.get("internet", False) else "no_internet",
         "time_synced": datetime.now().year > 2024,
         "gps": snap.get("gps_present", False),
+        "platform": "pi",
+        "product_class": _get_product_class(),
+        "env": "pi",
     }
 
     # BME280 / barometric data

@@ -51,6 +51,8 @@ AFC_BC = [100.0, 500.0, 1000.0, 5000.0]
 AFC_FLOW = [0.300, 0.100, 0.050, 0.025]
 
 STALL_FLOW = 0.015  # LPM below which pump is considered stalled
+P_HOLD_DEADBAND_LPM = 0.010
+P_HOLD_PERSIST_S = 4.0
 
 
 def _table_lookup(x, x_table, y_table):
@@ -128,6 +130,8 @@ class Pump:
         self._recovering = False
         self._failed = False
         self._sweep_requested = False
+        self._p_hold_direction = 0
+        self._p_hold_since = 0.0
 
         # Rolling flow buffer for median smoothing
         self._roll_buf = deque(maxlen=80)
@@ -236,6 +240,31 @@ class Pump:
     def trigger_sweep(self):
         """Request a duty re-sweep on next pump loop iteration."""
         self._sweep_requested = True
+
+    def _reset_p_hold(self, now=0.0):
+        self._p_hold_direction = 0
+        self._p_hold_since = now
+
+    def _p_hold_step(self, flow_lpm: float, target_lpm: float, now=None) -> int:
+        """Return a ±1 duty step after four seconds outside the 10 ml band."""
+        now = time.monotonic() if now is None else now
+        direction = 0
+        if flow_lpm < target_lpm - P_HOLD_DEADBAND_LPM:
+            direction = 1
+        elif flow_lpm > target_lpm + P_HOLD_DEADBAND_LPM:
+            direction = -1
+
+        if direction == 0:
+            self._reset_p_hold(now)
+            return 0
+        if direction != self._p_hold_direction:
+            self._p_hold_direction = direction
+            self._p_hold_since = now
+            return 0
+        if now - self._p_hold_since < P_HOLD_PERSIST_S:
+            return 0
+        self._reset_p_hold(now)
+        return direction
 
     def push_bc(self, bc: float):
         """Record a BC measurement for AFC calculations."""
@@ -458,6 +487,7 @@ class Pump:
                 self._settled_seconds = 0
                 self._recovering = False
                 self._failed = False
+                self._reset_p_hold(time.monotonic())
                 stop_event.wait(0.5)
                 continue
 
@@ -479,6 +509,7 @@ class Pump:
                 target_lpm = self.clamp_target_lpm(target_lpm, "Configured")
 
             if disable_ctrl or not airflow_sensor:
+                self._reset_p_hold(time.monotonic())
                 d = self._config.get_int("pump_dutycycle", 20) if self._config else 40
                 if self._duty != d:
                     self.set_duty(d)
@@ -492,6 +523,7 @@ class Pump:
                 need_sweep = True
                 self._sweep_requested = False
             if need_sweep or abs(target_lpm - self._last_target) > 0.03:
+                self._reset_p_hold(time.monotonic())
                 def should_continue():
                     return not stop_event.is_set() and bool(state.get("sampling") if state else True)
 
@@ -530,6 +562,7 @@ class Pump:
 
             # Stall detection and recovery
             if flow < STALL_FLOW and self._duty > 0:
+                self._reset_p_hold(time.monotonic())
                 self._stall_seconds += 1
                 self._settled_seconds = 0
                 if self._stall_seconds >= 3:
@@ -550,7 +583,11 @@ class Pump:
                     found = self.find_duty(new_target, should_continue=lambda: (
                         not stop_event.is_set() and bool(state.get("sampling") if state else True)
                     ))
-                    if found is None:
+                    recovery_ok = found not in (None, 0)
+                    if recovery_ok:
+                        self._duty = found
+                        self.set_duty(found)
+                    else:
                         self.set_duty(0)
                     self._recovering = False
                     self._stall_seconds = 0
@@ -569,8 +606,9 @@ class Pump:
                     else:
                         if state:
                             state.set("flow_health", 0)
-                        need_sweep = False
-                        self._last_target = new_target
+                        need_sweep = not recovery_ok
+                        if recovery_ok:
+                            self._last_target = new_target
             else:
                 self._stall_seconds = 0
                 if flow >= STALL_FLOW and self._duty > 0:
@@ -584,15 +622,12 @@ class Pump:
                     # which leaves the pump at fixed duty and lets filter
                     # loading / pump wear drag flow away from target).
                     # Runs regardless of AFC: AFC adjusts target, this holds it.
-                    # Deadband ±50 ml/min prevents oscillation.
+                    # A direction must persist outside ±10 ml/min for 4 s;
+                    # each applied step restarts persistence to avoid chatter.
                     if not self._recovering and target_lpm > 0:
                         d_min = self._config.get_int("min_pump_duty", 0) if self._config else 0
                         d_max = self._config.get_int("max_pump_duty", 255) if self._config else 255
-                        nd = self._duty
-                        if flow < target_lpm - 0.050:
-                            nd += 1
-                        elif flow > target_lpm + 0.050:
-                            nd -= 1
+                        nd = self._duty + self._p_hold_step(flow, target_lpm)
                         nd = max(d_min, min(d_max, nd))
                         if nd != self._duty:
                             self._duty = nd

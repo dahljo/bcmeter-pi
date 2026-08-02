@@ -1107,10 +1107,25 @@ def send_flow_bump(old_target: float, new_target: float):
     })
 
 
-def send_temperature_alert(temp: float):
-    send_email("TemperatureWarning", {
-        "temp": temp,
-        "message": f"Temperature {temp:.1f}C is outside operating range (5-40C).",
+def send_overtemperature_incident(temperature_c: float, threshold_c: float,
+                                  phase: str):
+    """Queue the single incident notification for a thermal shutdown."""
+    try:
+        from bcmeter import incident_log
+        incidents = json.loads(incident_log.to_json())
+    except Exception:
+        incidents = []
+    return send_email("Status", {
+        "event": "Overtemperature shutdown",
+        "error_code": "OVERTEMP",
+        "temperature_c": temperature_c,
+        "threshold_c": threshold_c,
+        "phase": phase,
+        "incidents": incidents,
+        "message": (
+            f"Measurement stopped because temperature reached "
+            f"{temperature_c:.1f}C (shutdown threshold {threshold_c:.1f}C)."
+        ),
     })
 
 

@@ -1,11 +1,49 @@
 """Device identity helpers for Linux hostname and mDNS."""
 
+import errno
+import hashlib
 import logging
 import re
 import socket
 import subprocess
 
 logger = logging.getLogger("bcmeter.identity")
+
+_DEVICE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
+
+
+def is_safe_device_name(value: str) -> bool:
+    return bool(_DEVICE_NAME_RE.fullmatch(str(value or "")))
+
+
+def safe_device_name(value: str) -> str:
+    """Return an HTTP-header/AT-command-safe stable display identity."""
+    name = str(value or "bcMeter")
+    if is_safe_device_name(name):
+        return name
+    # Existing free-form names cannot be inserted into modem AT commands. Use
+    # a collision-resistant stable identity and require explicit reprovisioning
+    # instead of silently collapsing distinct names to the same sanitized text.
+    digest = hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"bcMeter-legacy-{digest}"
+
+
+def _write_root_file(path: str, content: str):
+    try:
+        with open(path, "w") as f:
+            f.write(content)
+        return
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
+            raise
+        proc = subprocess.run(
+            ["sudo", "tee", path],
+            input=content.encode(),
+            capture_output=True,
+            timeout=5,
+        )
+        if proc.returncode != 0:
+            raise PermissionError(proc.stderr.decode(errors="ignore").strip())
 
 
 def hostname_from_device_name(device_name: str) -> str:
@@ -21,8 +59,7 @@ def _write_hosts_hostname(hostname: str):
     with open(hosts, "r") as f:
         lines = [l for l in f.read().splitlines() if "127.0.1.1" not in l]
     lines.append(f"127.0.1.1\t{hostname}")
-    with open(hosts, "w") as f:
-        f.write("\n".join(lines) + "\n")
+    _write_root_file(hosts, "\n".join(lines) + "\n")
 
 
 def sync_system_hostname(device_name: str, reason: str = "hostname changed") -> tuple[str, bool]:
@@ -43,8 +80,7 @@ def sync_system_hostname(device_name: str, reason: str = "hostname changed") -> 
     )
     if proc.returncode != 0:
         subprocess.run(["sudo", "hostname", desired], capture_output=True, timeout=5)
-        with open("/etc/hostname", "w") as f:
-            f.write(desired + "\n")
+        _write_root_file("/etc/hostname", desired + "\n")
 
     _write_hosts_hostname(desired)
 

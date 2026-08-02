@@ -115,6 +115,10 @@ class PublicMeasurementAccessPolicyTest(unittest.TestCase):
             status_source,
         )
         self.assertIn("Private diagnostics unavailable", status_source)
+        package_source = (ROOT / "bcmeter" / "__init__.py").read_text()
+        self.assertIn('__product_class__ = "bcmeter"', package_source)
+        self.assertIn('"platform": "pi"', status_source)
+        self.assertIn('"product_class": _get_product_class()', status_source)
 
     def test_frontend_loads_graph_without_requesting_admin_password(self):
         interface = (ROOT / "interface" / "index.html").read_text()
@@ -206,6 +210,7 @@ class PublicReadRedactionApiTest(unittest.TestCase):
         )
         (self.log_dir / self.csv_name).write_text(self.csv_text)
         self.cfg = CfgStore(str(Path(self.tmp.name) / "config.json"))
+        self.cfg.set_device_name("bcMeter-CA38")
         for key, value in {
             "mail_logs_to": "owner@example.invalid",
             "email_api_key": "existing-email-secret",
@@ -303,12 +308,16 @@ class PublicReadRedactionApiTest(unittest.TestCase):
         status = self.client.get("/api/status")
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["wifi_ssid"], "")
+        self.assertEqual(status.json()["platform"], "pi")
+        self.assertEqual(status.json()["product_class"], "bcmeter")
 
         system = self.client.get("/api/system")
         self.assertEqual(system.status_code, 200)
         self.assertEqual(system.json()["ip"], "")
         self.assertEqual(system.json()["mac"], "")
         self.assertNotIn("gps_lat", system.json())
+        self.assertEqual(system.json()["platform"], "pi")
+        self.assertEqual(system.json()["product_class"], "bcmeter")
 
         logs = self.client.get("/api/logs")
         self.assertEqual(logs.status_code, 200)
@@ -343,6 +352,13 @@ class PublicReadRedactionApiTest(unittest.TestCase):
         self.assertEqual(response.text, self.csv_text)
         self.assertIn("GPS_lat;GPS_lon;PM2_5;SHT_humidity", response.text)
         self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertRegex(
+            response.headers["content-disposition"],
+            r'^attachment; filename="bcMeter-CA38_[0-9]{8}_[0-9]{6}\.csv"$',
+        )
+        self.assertEqual(
+            response.headers["x-bcmeter-download-device"], "bcMeter-CA38"
+        )
 
     def test_passwordless_normal_writes_require_local_client_intent(self):
         missing = self.client.post("/api/config", json={"sample_time": 234})

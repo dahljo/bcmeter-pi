@@ -2,7 +2,7 @@
 
 Port of ESP32's Notes namespace from notes.cpp.
 Accumulates short diagnostic codes during a measurement cycle,
-then drains them into the CSV row's 'notice' column.
+then drains them into the CSV row's 'notes' column.
 """
 
 import threading

@@ -32,7 +32,7 @@ _ERROR_STRINGS = {
     ErrorCode.ERR_ADC_LOW: "ADC signal too low — filter extremely loaded",
     ErrorCode.ERR_ADC_SATURATED: "ADC saturated — LED too bright or no filter present",
     ErrorCode.ERR_FLOW_ZERO: "No airflow detected",
-    ErrorCode.ERR_OVERTEMP: "Temperature exceeds 65°C",
+    ErrorCode.ERR_OVERTEMP: "Temperature shutdown threshold exceeded",
     ErrorCode.ERR_LED_FAILURE: "No reference signal from LED",
     ErrorCode.ERR_ATN_LIMIT: "Filter needs replacement",
     ErrorCode.ERR_OUTLIER_EXCESS: "ADC noise — excessive reads out-of-bounds",

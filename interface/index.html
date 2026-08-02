@@ -809,9 +809,33 @@ function switchTab(el,id){_resetWifiFooter();document.querySelectorAll('.nav-lin
 function apiCall(a){fetch('/api/control?action='+a)}
 function confirmAction(a){var msgs={reboot:'Reboot the device? Any running measurement will be interrupted.',shutdown:'Shut down the device? You will need physical access to power it back on.',cleardata:'Delete ALL stored log files? This cannot be undone.',cleanempty:'Remove all empty (0 byte) log files? These are typically from interrupted sessions.'};if(confirm(msgs[a]||('Confirm: '+a+'?'))){apiCall(a);if(a==='cleanempty'||a==='cleardata')setTimeout(loadLogFiles,500)}}
 function pad2(n){n=parseInt(n,10)||0;return(n<10?'0':'')+n}
-function makeDownloadName(){
+function safeDeviceDownloadName(name){
+var raw=String(name||'').trim(),suffix=(raw.match(/-[A-Za-z0-9]{4}$/)||[''])[0];
+var safe=raw.replace(/[^A-Za-z0-9._-]+/g,'-').replace(/^[._-]+|[._-]+$/g,'');
+if(!safe){safe=String(location.hostname||'').replace(/\.local$/i,'').replace(/[^A-Za-z0-9._-]+/g,'-').replace(/^[._-]+|[._-]+$/g,'')||'bcMeter';}
+if(safe.length>64){var keep=64-suffix.length;safe=safe.slice(0,keep).replace(/[._-]+$/,'')+suffix;}
+return safe;
+}
+function safeCsvSourceName(name){
+var leaf=String(name||'').split(/[\\/]/).pop().replace(/\.csv$/i,'');
+leaf=leaf.replace(/[^A-Za-z0-9._-]+/g,'-').replace(/^[._-]+|[._-]+$/g,'')||'session';
+return leaf;
+}
+function makeDownloadName(sourceName){
+var dev=safeDeviceDownloadName(deviceName);
+if(sourceName){var leaf=safeCsvSourceName(sourceName);if(leaf.toLowerCase().indexOf(dev.toLowerCase()+'_')===0)return leaf+'.csv';leaf=leaf.replace(/^bcmeter_+/i,'')||'session';return dev+'_'+leaf+'.csv';}
 var d=new Date();
-return 'bcmeter_'+d.getFullYear()+pad2(d.getMonth()+1)+pad2(d.getDate())+'_'+pad2(d.getHours())+pad2(d.getMinutes())+pad2(d.getSeconds())+'.csv';
+return dev+'_'+d.getFullYear()+pad2(d.getMonth()+1)+pad2(d.getDate())+'_'+pad2(d.getHours())+pad2(d.getMinutes())+pad2(d.getSeconds())+'.csv';
+}
+function csvDownloadNameFromResponse(response,fallback){
+rememberCsvDownloadDevice(response);
+var cd=response&&response.headers?response.headers.get('content-disposition')||'':'';
+var m=cd.match(/filename="?([^";]+)"?/i);
+return m&&m[1]?m[1]:fallback;
+}
+function rememberCsvDownloadDevice(response){
+var name=response&&response.headers?response.headers.get('x-bcmeter-download-device')||'':'';
+if(name)deviceName=name;
 }
 function patchDownloadLinks(){
 var a=document.querySelector('a[href="/api/csv"]');
@@ -975,7 +999,7 @@ if((d.status===1||d.status===2)&&previousDeviceStatus!==1&&previousDeviceStatus!
 filterPeak=-1;alertFilterShown=false;alertPumpShown=false;alertHumidityShown=false;
 }
 if(d.status===0&&!chartData.length&&$('logs_select').value==='current') loadSessionList();
-deviceName=d.name||'bcMeter';
+deviceName=d.name||deviceName||String(location.hostname||'bcMeter').replace(/\.local$/i,'')||'bcMeter';
 if(d.version){var fv=$('fwVersion');if(fv)fv.textContent=d.version}
 checkOtaSuccessNotice(d);
 if(d.ota_available&&!otaAvailShown)checkOtaAvailable();
@@ -1009,7 +1033,7 @@ fDot.className='status-dot '+(loading<30?'green':loading<70?'orange':'red');
 if(d.status==2&&!alertFilterShown&&filterPeak>=0&&(100-filterPeak)>=70){
 alertFilterShown=true;$('alertFilterPct').textContent=100-filterPeak;showModal('alertFilter');
 }
-if(d.status==2&&!alertPumpShown&&d.flow<0.05&&d.samples>5){
+if(d.status==3&&d.error===3&&!alertPumpShown){
 alertPumpShown=true;showModal('alertPump');
 }
 if(d.warning_msg&&(d.status==2||d.status==1)){stTxt.textContent=(d.status==1?'warming up '+Math.max(0,Math.min(99,+d.warmup_progress||0))+'% — ':'running — ')+d.warning_msg;stDot.className='status-dot orange';}
@@ -1300,6 +1324,14 @@ if(o[0]===(item.value||'median3'))b.className='active';
 b.onclick=function(){seg.querySelectorAll('button').forEach(function(x){x.classList.remove('active')});b.classList.add('active');hid.value=o[0]};
 seg.appendChild(b)});
 fg.appendChild(lbl);fg.appendChild(hid);fg.appendChild(seg);
+}else if(item.key==='temperature_shutdown_c'){
+var val=parseFloat(item.value);if(!isFinite(val))val=65;val=Math.max(40,Math.min(80,val));
+var lbl=document.createElement('label');lbl.textContent=item.desc;
+var inp=document.createElement('input');inp.type='number';inp.className='form-control';
+inp.id='cfg_'+item.key;inp.min=40;inp.max=80;inp.step=.5;inp.value=val;
+var note=document.createElement('small');note.className='form-hint';note.style.cssText='color:#c4883a;font-size:.78rem';
+note.textContent='Safety range 40–80 °C. Reaching it records an incident, stops and finalizes the session, and sends one incident email.';
+fg.appendChild(lbl);fg.appendChild(inp);fg.appendChild(note);
 }else if(item.type==='string'){
 var lbl=document.createElement('label');lbl.textContent=item.desc;
 var inp=document.createElement('input');inp.type='text';inp.className='form-control';
@@ -1388,6 +1420,7 @@ pane.appendChild(infoDiv);
 if(g==='device'){
 var deviceLayout=[
 {label:'General',     keys:['timezone','warmup_seconds','disable_led']},
+{label:'Integration', keys:['modbus_tcp']},
 ];
 var itemMap={};
 groups[g].forEach(function(item){itemMap[item.key]=item;});
@@ -2327,7 +2360,7 @@ patchDownloadLinks();
 var sel=$('logs_select').value;
 if(sel==='_combine_all'){if(!combineAllLoaded)fetchCombineAll();return}
 var url=sel==='current'?'/api/csv':'/api/csv?file='+encodeURIComponent(sel);
-fetch(url,{cache:'no-store'}).then(r=>r.text()).then(csv=>{
+fetch(url,{cache:'no-store'}).then(function(r){rememberCsvDownloadDevice(r);return r.text()}).then(csv=>{
 onFetchOk('csv');
 var h=csv.length+':'+csv.slice(-80);
 if(h===lastCSVHash) return;
@@ -2362,7 +2395,7 @@ var valid=files.filter(function(f){return f&&f.name&&f.lines>=3});
 var urls=['/api/csv'];
 valid.forEach(function(f){urls.push('/api/csv?file='+encodeURIComponent(f.name))});
 var csvTexts=[],total=urls.length,done=0;
-return urls.reduce(function(chain,u){return chain.then(function(){return fetch(u,{cache:'no-store'}).then(function(r){return r.text()}).then(function(t){csvTexts.push(t);done++;if(progBar)progBar.style.width=Math.round(done/total*100)+'%';if(stTxt)stTxt.textContent='Loading sessions ('+done+'/'+total+')...';})})},Promise.resolve()).then(function(){return csvTexts});
+return urls.reduce(function(chain,u){return chain.then(function(){return fetch(u,{cache:'no-store'}).then(function(r){rememberCsvDownloadDevice(r);if(r.ok)return r.text();throw new Error('HTTP '+r.status)}).then(function(t){csvTexts.push(t);done++;if(progBar)progBar.style.width=Math.round(done/total*100)+'%';if(stTxt)stTxt.textContent='Loading sessions ('+done+'/'+total+')...';})})},Promise.resolve()).then(function(){return csvTexts});
 }).then(function(csvTexts){
 onFetchOk('csv');
 var allData=[],colSet={},colArr=[];
@@ -2395,7 +2428,8 @@ combineAllLoaded=true;
 }).catch(function(){onFetchFail('csv');combineAllBusy=false;if(progWrap)progWrap.style.display='none';if(stTxt) stTxt.textContent='Failed to load sessions';if(stDot) stDot.className='status-dot red';});
 }
 function logSortValue(f){
-var m=((f&&f.name)||'').match(/^(\d{2})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})\.csv$/);
+var name=((f&&f.name)||'').replace(/^.*\//,'');
+var m=name.match(/^(\d{2})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})\.csv$/);
 if(m)return Date.UTC(2000+parseInt(m[3],10),parseInt(m[2],10)-1,parseInt(m[1],10),parseInt(m[4],10),parseInt(m[5],10),parseInt(m[6],10));
 if(f&&f.date){var t=Date.parse(String(f.date).replace(' ','T'));if(!isNaN(t))return t;}
 return -Infinity;
@@ -2415,6 +2449,7 @@ var sel=$('logs_select');
 var cur=sel.value;
 sel.innerHTML='<option value="current">Current Session</option>';
 var valid=files.filter(function(f){return f&&f.name&&f.lines>=3});
+valid.sort(function(a,b){return logSortValue(b)-logSortValue(a)});
 if(valid.length>0){
 var oa=document.createElement('option');oa.value='_combine_all';oa.textContent='All Sessions';
 sel.appendChild(oa);
@@ -2441,7 +2476,7 @@ var curPts=document.createElement('td');curPts.id='logPoints';curPts.textContent
 var curAct=document.createElement('td');
 var curBtn=document.createElement('button');curBtn.className='btn btn-sm btn-primary';curBtn.textContent='Download';curBtn.onclick=dlCSV;
 curAct.appendChild(curBtn);curTr.appendChild(curName);curTr.appendChild(curPts);curTr.appendChild(curAct);tb.appendChild(curTr);
-files.filter(function(f){return f&&f.name&&f.lines>=3}).forEach(function(f){
+files.filter(function(f){return f&&f.name&&f.lines>=3}).sort(function(a,b){return logSortValue(b)-logSortValue(a)}).forEach(function(f){
 var tr=document.createElement('tr');
 var nameTd=document.createElement('td');nameTd.textContent=f.name;
 var sizeTd=document.createElement('td');sizeTd.textContent=Math.round(f.size/1024)+'kB';
@@ -2454,7 +2489,10 @@ tb.appendChild(tr);
 }).catch(function(){});
 }
 function dlFile(name){
-fetch('/api/csv?file='+encodeURIComponent(name),{cache:'no-store'}).then(r=>r.blob()).then(function(b){blobDl(b,name)});
+fetch('/api/csv?file='+encodeURIComponent(name),{cache:'no-store'}).then(function(r){
+if(!r.ok)return r.text().then(function(t){throw new Error(t||('HTTP '+r.status))});
+var fn=csvDownloadNameFromResponse(r,makeDownloadName(name));return r.blob().then(function(b){blobDl(b,fn)});
+}).catch(function(e){toast('Download failed: '+e.message,'error',5000)});
 }
 function deleteLogFile(name){
 if(!confirm('Delete log "'+name+'"? This cannot be undone.'))return;
@@ -3132,7 +3170,7 @@ $('y1MaxAuto').onchange=e=>$('y1Max').disabled=e.target.checked;
 $('saveGraph').onclick=()=>showModal('download');
 function dlView(fmt){
 hideModal('download');
-var ts=new Date(),prefix='bcmeter_'+ts.getFullYear()+pad2(ts.getMonth()+1)+pad2(ts.getDate())+'_'+pad2(ts.getHours())+pad2(ts.getMinutes());
+var ts=new Date(),prefix=safeDeviceDownloadName(deviceName)+'_'+ts.getFullYear()+pad2(ts.getMonth()+1)+pad2(ts.getDate())+'_'+pad2(ts.getHours())+pad2(ts.getMinutes());
 if(fmt==='png'){
 canvas.toBlob(function(b){blobDl(b,prefix+'_chart.png')},'image/png');
 } else if(fmt==='svg'){
@@ -3197,7 +3235,11 @@ svg+='</svg>';return svg;
 function dlCSV(){
 var sel=$('logs_select').value;
 var url=sel==='current'?'/api/csv':'/api/csv?file='+encodeURIComponent(sel);
-fetch(url,{cache:'no-store'}).then(r=>r.blob()).then(function(b){blobDl(b,sel==='current'?makeDownloadName():sel)});
+fetch(url,{cache:'no-store'}).then(function(r){
+if(!r.ok)return r.text().then(function(t){throw new Error(t||('HTTP '+r.status))});
+var fallback=sel==='current'?makeDownloadName():makeDownloadName(sel);
+var fn=csvDownloadNameFromResponse(r,fallback);return r.blob().then(function(b){blobDl(b,fn)});
+}).catch(function(e){toast('Download failed: '+e.message,'error',5000)});
 }
 /* --- RESTORED MEASUREMENT LOGIC --- */
 var startupPoll=null;

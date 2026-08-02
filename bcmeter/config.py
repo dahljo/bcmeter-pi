@@ -7,6 +7,7 @@ with the existing bcMeter_config.json format.
 import json
 import os
 import logging
+import math
 import re
 import threading
 
@@ -56,6 +57,7 @@ REGISTRY = [
     CfgEntry("calibration_warmup_seconds", "Calibration LED warmup time (s)", "dev:calibration", T_INT, 120),
     CfgEntry("ap_secured", "Protect hotspot with password", "device", T_BOOL, False),
     CfgEntry("ap_password", "Hotspot password", "device", T_STRING, "bcMeterbcMeter"),
+    CfgEntry("modbus_tcp", "Modbus TCP server (port 502, read-only)", "device", T_BOOL, False),
     CfgEntry("disable_pump_control", "Disable internal pump control", "device", T_BOOL, False),
     CfgEntry("airflow_sensor", "Airflow sensor available", "device", T_BOOL, True),
     CfgEntry("af_sensor_type", "Airflow sensor type (0=P0001A1, 1=P0010A2)", "device", T_INT, 1),
@@ -107,6 +109,13 @@ REGISTRY = [
     CfgEntry("team_upload_interval", "Cloud sync interval (hours, gated by share_with_bcmeter)", "dev:system", T_FLOAT, 1.0),
     CfgEntry("bcmeter_team_email", "bcMeter team contact email", "dev:system", T_STRING, ""),
     CfgEntry("heating", "Enable heating", "dev:system", T_BOOL, False),
+    CfgEntry(
+        "temperature_shutdown_c",
+        "Temperature shutdown threshold (°C)",
+        "dev:system",
+        T_FLOAT,
+        65.0,
+    ),
     CfgEntry("last_cal_time", "Last calibration timestamp", "dev:system", T_STRING, "never"),
     # --- session: BC filter ---
     CfgEntry("filter_days", "Target filter lifetime (days)", "session", T_INT, 7),
@@ -114,6 +123,27 @@ REGISTRY = [
 ]
 
 _REGISTRY_MAP = {e.key: e for e in REGISTRY}
+
+TEMPERATURE_SHUTDOWN_DEFAULT_C = 65.0
+TEMPERATURE_SHUTDOWN_MIN_C = 40.0
+TEMPERATURE_SHUTDOWN_MAX_C = 80.0
+
+
+def _normalize_config_value(key: str, value):
+    """Apply safety-critical bounds before values enter RAM or persistence."""
+    if key != "temperature_shutdown_c":
+        return value
+    try:
+        value = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return TEMPERATURE_SHUTDOWN_DEFAULT_C
+    if not math.isfinite(value):
+        return TEMPERATURE_SHUTDOWN_DEFAULT_C
+    return max(
+        TEMPERATURE_SHUTDOWN_MIN_C,
+        min(TEMPERATURE_SHUTDOWN_MAX_C, value),
+    )
+
 _SECRET_PLACEHOLDERS = {"", "configured", "email_service_password", "your_api_key", "iot_api_key"}
 DEVICE_NAME_CUSTOM_KEY = "device_name_custom"
 _AUTO_DEVICE_NAME_RE = re.compile(r"^[A-Za-z]?bcMeter-[0-9A-Fa-f]{4}$", re.IGNORECASE)
@@ -190,7 +220,10 @@ class CfgStore:
                         custom_marker_present = True
                     if isinstance(obj, dict) and "value" in obj:
                         if key in self._data:
-                            self._data[key]["value"] = obj["value"]
+                            normalized = _normalize_config_value(key, obj["value"])
+                            self._data[key]["value"] = normalized
+                            if normalized != obj["value"]:
+                                migrated = True
                         else:
                             # Preserve unknown keys for forward/backward compatibility.
                             self._data[key] = obj
@@ -331,6 +364,7 @@ class CfgStore:
 
     def set(self, key: str, value):
         """Set a config value. Creates entry if it doesn't exist."""
+        value = _normalize_config_value(key, value)
         with self._lock:
             if key in self._data:
                 self._data[key]["value"] = value
@@ -401,7 +435,7 @@ class CfgStore:
                 elif key == DEVICE_NAME_CUSTOM_KEY:
                     custom_marker_seen = True
                 if key in self._data:
-                    self._data[key]["value"] = val
+                    self._data[key]["value"] = _normalize_config_value(key, val)
                 else:
                     # Preserve extension keys supplied by newer/older clients.
                     reg = _REGISTRY_MAP.get(key)

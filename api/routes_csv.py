@@ -5,6 +5,8 @@ Matches the ESP32 /api/csv and /api/files contracts.
 
 import logging
 import os
+import re
+import socket
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
@@ -53,6 +55,69 @@ def _stream_file(filepath: str):
             yield chunk
 
 
+_DOWNLOAD_COMPONENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_DEVICE_SUFFIX_RE = re.compile(r"-[A-Za-z0-9]{4}$")
+_GENERIC_LOG_PREFIX_RE = re.compile(r"^bcmeter_+", re.IGNORECASE)
+_MAX_DOWNLOAD_COMPONENT = 64
+
+
+def _safe_download_component(value: str, fallback: str) -> str:
+    """Return one attachment-name component without losing a ``-XXXX`` suffix."""
+    raw = str(value or "").strip()
+    safe = _DOWNLOAD_COMPONENT_RE.sub("-", raw).strip("._-")
+    if not safe:
+        safe = fallback
+
+    # Keep a defensive limit for legacy/imported configurations, truncating
+    # the descriptive prefix rather than the hardware-identifying suffix.
+    if len(safe) > _MAX_DOWNLOAD_COMPONENT:
+        suffix_match = _DEVICE_SUFFIX_RE.search(safe)
+        suffix = suffix_match.group(0) if suffix_match else ""
+        prefix_limit = _MAX_DOWNLOAD_COMPONENT - len(suffix)
+        prefix = safe[:prefix_limit].rstrip("._-")
+        safe = (prefix or fallback[:prefix_limit]) + suffix
+    return safe
+
+
+def _configured_device_download_name() -> str:
+    name = _cfg.get_string("device_name", "") if _cfg else ""
+    if not str(name or "").strip():
+        name = socket.gethostname().split(".", 1)[0]
+    return _safe_download_component(name, "bcMeter")
+
+
+def _csv_download_name(
+    source_filename: str = "", now: datetime = None, device_name: str = ""
+) -> str:
+    """Build a safe CSV attachment name headed by the full configured name."""
+    device_name = device_name or _configured_device_download_name()
+    if source_filename:
+        leaf = os.path.basename(str(source_filename)).removesuffix(".csv")
+        leaf = _safe_download_component(leaf, "session")
+        if leaf.lower().startswith(device_name.lower() + "_"):
+            return f"{leaf}.csv"
+        leaf = _GENERIC_LOG_PREFIX_RE.sub("", leaf)
+        leaf = _safe_download_component(leaf, "session")
+        return f"{device_name}_{leaf}.csv"
+
+    timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    return f"{device_name}_{timestamp}.csv"
+
+
+def _csv_attachment_headers(source_filename: str = "") -> dict:
+    device_name = _configured_device_download_name()
+    return {
+        "Content-Disposition": (
+            f'attachment; filename="{_csv_download_name(source_filename, device_name=device_name)}"'
+        ),
+        "X-bcMeter-Download-Device": device_name,
+        "Access-Control-Expose-Headers": (
+            "Content-Disposition, X-bcMeter-Download-Device"
+        ),
+        "Cache-Control": "no-store",
+    }
+
+
 # ---------------------------------------------------------------------------
 # GET /api/csv
 # ---------------------------------------------------------------------------
@@ -98,20 +163,13 @@ async def api_csv(file: str = Query("", description="Filename to download")):
                 return PlainTextResponse(
                     header + "\n",
                     media_type="text/csv",
-                    headers={"Cache-Control": "no-store"},
+                    headers=_csv_attachment_headers(),
                 )
 
-    # Build a descriptive download filename
-    now = datetime.now()
-    if now.year > 2024:
-        download_name = now.strftime("bcmeter_%Y%m%d_%H%M%S.csv")
-    else:
-        download_name = f"bcmeter_{fname}" if fname else "bcmeter_session.csv"
-
-    headers = {
-        "Content-Disposition": f'attachment; filename="{download_name}"',
-        "Cache-Control": "no-store",
-    }
+    # The direct API response is authoritative for browser and UI downloads.
+    # Preserve the stored timestamp for an explicitly selected archive; current
+    # CSV downloads use the current wall-clock timestamp.
+    headers = _csv_attachment_headers(fname if file else "")
 
     return StreamingResponse(
         _stream_file(filepath),

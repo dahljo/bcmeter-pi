@@ -14,6 +14,7 @@ from .routes_wifi import router as wifi_router
 from .routes_csv import router as csv_router
 from .routes_calibration import router as calibration_router
 from .routes_ota import router as ota_router
+from .routes_modbus import router as modbus_router
 
 logger = logging.getLogger("bcmeter.api")
 
@@ -30,6 +31,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["GET"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-bcMeter-Download-Device"],
 )
 
 # Include all route modules
@@ -40,6 +42,7 @@ app.include_router(wifi_router, prefix="/api")
 app.include_router(csv_router, prefix="/api")
 app.include_router(calibration_router, prefix="/api")
 app.include_router(ota_router, prefix="/api")
+app.include_router(modbus_router, prefix="/api")
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +120,7 @@ if os.path.isdir(_manual_dir):
 # ---------------------------------------------------------------------------
 
 def set_dependencies(cfg, state_mgr, engine, storage, network_manager,
-                     gps=None, status_led=None, pump=None):
+                     gps=None, status_led=None, pump=None, modbus=None):
     """Wire shared objects into all route modules.
 
     Called once during application startup after all subsystems are
@@ -125,7 +128,7 @@ def set_dependencies(cfg, state_mgr, engine, storage, network_manager,
     straightforward (just call with mocks).
     """
     from . import routes_status, routes_control, routes_config
-    from . import routes_wifi, routes_csv, routes_calibration
+    from . import routes_wifi, routes_csv, routes_calibration, routes_modbus
 
     routes_status.set_dependencies(cfg=cfg, state_mgr=state_mgr, storage=storage, gps=gps, pump=pump)
     routes_control.set_dependencies(cfg=cfg, state_mgr=state_mgr, engine=engine, storage=storage, status_led=status_led)
@@ -133,4 +136,5 @@ def set_dependencies(cfg, state_mgr, engine, storage, network_manager,
     routes_wifi.set_dependencies(cfg=cfg, network_manager=network_manager)
     routes_csv.set_dependencies(cfg=cfg, storage=storage)
     routes_calibration.set_dependencies(engine=engine, state_mgr=state_mgr)
+    routes_modbus.set_dependencies(modbus=modbus)
     logger.info("API dependencies wired")

@@ -5,7 +5,10 @@
 - Remove product-specific mode compatibility from the Raspberry Pi bcMeter base.
 - Reset stale measurement errors, warnings, filter state, and warm-up state when a new session begins.
 - Report authoritative warm-up progress through `/api/status`, including the frozen progress at which an error stopped a session.
-- Keep the 65°C emergency cutoff unchanged; it is already above the 60°C rated operating maximum of optional D6F and SPS30 peripherals.
+- Treat 65°C as a thermal incident by default: finalize the active session cleanly, stop the pump, send one incident notification, and expose a bounded 40–80°C threshold in DEV settings.
+- Use the configured `bcMeter-XXXX` device name for current, archived, combined, and viewed CSV download filenames.
+- Harden pump startup and low-flow recovery so measurement sessions start airflow predictably without masking thermal incidents as airflow failures.
+- Add read-only Modbus TCP integration and resilient log handling across late system-time synchronization.
 - Remove private QC, lab-control, maintenance CLI, and arbitrary archive-upload surfaces from the public DIY tree.
 - Require a SHA-256-pinned GitHub Release asset and path-safe extraction for OTA updates.
 - Store configuration and WiFi credential files atomically with owner-only permissions.

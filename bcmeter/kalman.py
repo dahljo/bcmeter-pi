@@ -1,9 +1,11 @@
 """BC smoothing filters — multi-mode.
 
 Direct port of ESP32's BCFilter struct from measure.cpp.
-Supports: median-of-3 only, median-of-3 + adaptive EMA, adaptive Kalman.
+Supports: disabled/raw, median-of-3 only, median-of-3 + adaptive EMA,
+adaptive Kalman.
 """
 
+FILT_DISABLED = "disabled"
 FILT_MEDIAN3 = "median3"
 FILT_MEDIAN3_EMA = "ema"
 FILT_ADAPTIVE_KALMAN = "kalman"
@@ -13,6 +15,7 @@ class BCFilter:
     """Multi-mode BC filter. Port from ESP32 measure.cpp BCFilter struct.
 
     Modes:
+        disabled — raw BC, without firmware smoothing
         median3  — median-of-3 only (default, zero phase lag)
         ema      — median-of-3 + adaptive EMA (variance-based alpha)
         kalman   — median-of-3 + innovation-gated adaptive Kalman
@@ -46,6 +49,10 @@ class BCFilter:
 
     def update(self, raw: float) -> float:
         """Feed a new raw BC value and return the filtered estimate."""
+        if self.mode == FILT_DISABLED:
+            self.x = raw
+            return raw
+
         self.med[self.mi % 3] = raw
         self.mi += 1
 

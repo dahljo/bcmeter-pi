@@ -23,6 +23,7 @@ from . import email_handler
 from . import incident_log
 from . import qnh
 from . import timesync
+from . import geoloc
 
 logger = logging.getLogger("bcmeter.measure")
 
@@ -30,10 +31,12 @@ logger = logging.getLogger("bcmeter.measure")
 # Constants (ported from ESP32 measure.cpp / config.h)
 # ---------------------------------------------------------------------------
 ADC_LOW_LIMIT_DEFAULT = 0.5
-# Emergency cutoff. This is already above the 60°C rated operating maximum
-# of optional D6F/SPS30 peripherals, so it must not be raised as a way to avoid
-# nuisance trips.
+# Default emergency cutoff. The live value is configurable in DEV settings
+# and clamped to a bounded 40-80°C range at every read.
 TEMP_LIMIT = 65.0
+TEMP_LIMIT_MIN = 40.0
+TEMP_LIMIT_MAX = 80.0
+TEMP_REARM_HYSTERESIS = 2.0
 ATN_LIMIT = 120.0
 REF_MIN_LED_ON = 0.05
 FLOW_SAMPLE_INTERVAL_S = 0.25
@@ -59,6 +62,8 @@ REF_DROP_WINDOW_S = 30 * 60
 REF_DROP_PCT = 20.0
 REF_DROP_MIN_ABS_V = 0.40
 REF_CRITICAL_LOW_LIMIT = 0.25
+NEG_BC_ARM_DELAY_S = 60 * 60
+NEG_BC_DURATION_S = 60 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +116,22 @@ def _timestamp_pair() -> tuple:
     return now.strftime("%d-%m-%y"), now.strftime("%H:%M:%S")
 
 
+def _periodic_due(now: float, deadline: float, interval: float) -> tuple:
+    """Return whether a periodic task is due and its next future deadline.
+
+    At most one task execution is requested per call.  If execution was
+    delayed by one or many intervals, the deadline is advanced in O(1) time
+    past ``now`` instead of asking the caller to replay every missed slot.
+    ``now`` and ``deadline`` must come from the same monotonic clock.
+    """
+    if interval <= 0.0:
+        raise ValueError("interval must be positive")
+    if now < deadline:
+        return False, deadline
+    intervals = int((now - deadline) // interval) + 1
+    return True, deadline + intervals * interval
+
+
 # ---------------------------------------------------------------------------
 # Session statistics (ring buffer for hourly average)
 # ---------------------------------------------------------------------------
@@ -137,7 +158,7 @@ class _BCStats:
             self._session_sum += bc
             self._session_count += 1
             self._ring_bc.append(bc)
-            self._ring_time.append(time.time())
+            self._ring_time.append(time.monotonic())
 
     def session_avg(self) -> float:
         with self._lock:
@@ -149,7 +170,7 @@ class _BCStats:
         with self._lock:
             if not self._ring_bc:
                 return 0.0
-            cutoff = time.time() - 3600.0
+            cutoff = time.monotonic() - 3600.0
             total = 0.0
             count = 0
             for bc_val, ts in zip(self._ring_bc, self._ring_time):
@@ -192,6 +213,8 @@ class MeasureEngine:
         self._bme = sensors.get("bme")
         self._storage = storage
         self._gps = gps
+        # Serializes optics/ADC access between measurement and calibration.
+        self._optics_lock = threading.Lock()
 
         # ADC voltage limits (derived from hardware Vref)
         self._adc_high_limit = adc.high_limit if adc.present else 3.8
@@ -217,9 +240,18 @@ class MeasureEngine:
         self._session_indoor = False
         self._next_session_indoor_override = False
         self._session_row_count = 0
+        # First skip/degradation reason since the last written row; the next
+        # row carries it in the `notice` column (ESP32 pendingSkipNote parity).
+        self._pending_skip_note = ""
+        self._pending_time_sync_note = False
+        self._time_sync_realign_pending = False
         self._ref_trend = deque(maxlen=12)
         self._ref_drop_active = False
         self._last_led_recovery_s = 0.0
+        # A thermal episode sends one incident notification. It remains
+        # latched across restart attempts and rearms only after the device has
+        # cooled at least 2°C below the configured shutdown threshold.
+        self._overtemp_incident_latched = False
 
     def set_next_session_indoor(self, on: bool):
         """One-shot override consumed on the next session start."""
@@ -227,6 +259,28 @@ class MeasureEngine:
 
     def is_session_indoor(self) -> bool:
         return self._session_indoor
+
+    def _record_skip_reason(self, code: str):
+        """Stash why a slot was skipped or a cycle degraded/aborted.
+
+        The next CSV row written carries it in the `notice` column so gaps
+        are explained without parsing logs (ESP32 recordSkipReason parity).
+        Codes: OV<ms>, PRC, PFL, SATf<ch>, LOW<pct>, ZF<n>. First reason
+        wins if multiple events happen before the next successful row."""
+        if not self._pending_skip_note:
+            self._pending_skip_note = code[:31]
+
+    def _apply_pending_time_sync(self) -> int:
+        """Correct the active log and keep TIME_SYNC pending for a written row."""
+        had_event, corrected_rows = self._storage.apply_pending_time_sync()
+        if not had_event:
+            return 0
+        if corrected_rows is None:
+            logger.warning("Time-sync log correction failed; retry remains pending")
+            return 0
+        self._pending_time_sync_note = True
+        self._time_sync_realign_pending = True
+        return corrected_rows
 
     # ------------------------------------------------------------------
     # Public getters (parity with ESP32 Measure namespace)
@@ -257,7 +311,7 @@ class MeasureEngine:
         """Hours since current session started."""
         if self._session_start_time <= 0:
             return 0.0
-        return (time.time() - self._session_start_time) / 3600.0
+        return (time.monotonic() - self._session_start_time) / 3600.0
 
     def get_session_avg_bc(self) -> float:
         """Average BC concentration over the current session."""
@@ -285,29 +339,55 @@ class MeasureEngine:
         while not stop_event.is_set():
             # ---- Wait for sampling flag ----
             last_idle_filter_check = 0.0
+            last_idle_env_read = 0.0
             while not state.sampling:
                 state.set("init_step", InitStep.INIT_IDLE)
+                now = time.monotonic()
+                # Periodic idle env refresh every 10 s — keeps temp/humidity/
+                # pressure current for Modbus/QC while not sampling (ESP32 parity)
+                if now - last_idle_env_read >= 10.0:
+                    last_idle_env_read = now
+                    try:
+                        temp, hum, pressure = self._read_env()
+                        env = {}
+                        if temp is not None:
+                            env["last_temp"] = temp
+                        if hum is not None:
+                            env["last_humidity"] = hum
+                        if pressure:
+                            env["last_pressure"] = pressure
+                        if env:
+                            state.update(**env)
+                        if temp is not None:
+                            self._rearm_overtemperature_if_cooled(temp)
+                    except Exception:
+                        logger.debug("Idle env read failed", exc_info=True)
                 # Periodic idle filter check every 30 s — brief LED burst
                 # to keep last_sen/last_ref current for the UI filter indicator
-                now = time.time()
                 if (self._adc.present
                         and not state.get("calibration_running")
                         and (now - last_idle_filter_check >= 30.0)):
                     last_idle_filter_check = now
-                    try:
-                        duty_0 = self._cfg.get_int("led_duty_cycle_880nm", 255)
-                        self._optics.set_led_duty(0, max(0, min(255, duty_0)))
-                        cal_k_0 = self._cfg.get_float("cal_k_880nm", 1.0)
-                        if cal_k_0 < 0.1 or cal_k_0 > 10.0:
-                            cal_k_0 = 1.0
-                        self._optics.led_on(0)
-                        time.sleep(0.2)
-                        sen = self._adc.read_sensor() * cal_k_0
-                        ref = self._adc.read_reference()
-                        self._optics.led_off(0)
-                        state.update(last_sen=sen, last_ref=ref)
-                    except Exception:
-                        logger.debug("Idle filter check failed", exc_info=True)
+                    # Non-blocking: if calibrate() holds the optics, skip
+                    # this round instead of stacking behind a minutes-long
+                    # calibration.
+                    if self._optics_lock.acquire(blocking=False):
+                        try:
+                            duty_0 = self._cfg.get_int("led_duty_cycle_880nm", 255)
+                            self._optics.set_led_duty(0, max(0, min(255, duty_0)))
+                            cal_k_0 = self._cfg.get_float("cal_k_880nm", 1.0)
+                            if cal_k_0 < 0.1 or cal_k_0 > 10.0:
+                                cal_k_0 = 1.0
+                            self._optics.led_on(0)
+                            time.sleep(0.2)
+                            sen = self._adc.read_sensor() * cal_k_0
+                            ref = self._adc.read_reference()
+                            self._optics.led_off(0)
+                            state.update(last_sen=sen, last_ref=ref)
+                        except Exception:
+                            logger.debug("Idle filter check failed", exc_info=True)
+                        finally:
+                            self._optics_lock.release()
                 if stop_event.wait(0.2):
                     logger.info("Measure engine thread exiting (stop event)")
                     return
@@ -319,8 +399,15 @@ class MeasureEngine:
                 logger.exception("Unhandled exception in measurement session")
             finally:
                 self._optics.all_off()
+                # Stop publishing new sync events before finalizing the file.
+                # Any event already pending still belongs to this session and
+                # must not leak into the next (already correctly timed) one.
+                state.sampling = False
                 if self._storage.session_active:
+                    self._apply_pending_time_sync()
                     self._storage.end_session()
+                else:
+                    state.consume_time_sync()
                 state.set("init_step", InitStep.INIT_IDLE)
                 # Do not force sampling=False here if error already cleared it
                 if state.get("error") != ErrorCode.ERR_NONE:
@@ -331,6 +418,11 @@ class MeasureEngine:
 
         logger.info("Measure engine thread exiting")
 
+    @property
+    def optics_lock(self):
+        """Shared optics/ADC lock; lab mode claims it for its whole run."""
+        return self._optics_lock
+
     def calibrate(self, log_fn=None):
         """Run calibration routine with a clean filter.
 
@@ -340,6 +432,27 @@ class MeasureEngine:
         Args:
             log_fn: Optional callable(str) for streaming calibration log lines.
         """
+        # Serialize optics/ADC access with the idle filter burst and lab
+        # mode.  The burst may have passed its calibration_running check just
+        # before the flag was raised, and OS scheduling can suspend it
+        # mid-flight for an unbounded time, so a fixed drain delay is not
+        # sufficient.  Fail fast instead of queueing behind a long optics
+        # user (a lab run can hold the lock for up to two minutes).
+        if not self._optics_lock.acquire(timeout=5):
+            msg = "[Cal] Optics busy (idle check or lab run) - aborting"
+            logger.warning(msg)
+            if log_fn:
+                try:
+                    log_fn(msg + "\n")
+                except Exception:
+                    pass
+            return False
+        try:
+            return self._calibrate_locked(log_fn)
+        finally:
+            self._optics_lock.release()
+
+    def _calibrate_locked(self, log_fn=None):
 
         def _log(msg):
             logger.info(msg)
@@ -506,10 +619,10 @@ class MeasureEngine:
             sen_sum = 0.0
             ref_sum = 0.0
             count = 0
-            end_t = time.time() + 10.0
-            next_reassert = time.time() + 0.25
-            while time.time() < end_t:
-                now = time.time()
+            end_t = time.monotonic() + 10.0
+            next_reassert = time.monotonic() + 0.25
+            while time.monotonic() < end_t:
+                now = time.monotonic()
                 if now >= next_reassert:
                     self._optics.set_led_duty(ch, duty)
                     self._optics.led_on(ch)
@@ -583,7 +696,11 @@ class MeasureEngine:
         error = self._preflight_check()
         if error != ErrorCode.ERR_NONE:
             logger.error("Preflight FAILED: %s", error.name)
-            self._set_error(error)
+            # Overtemperature handling already stopped the pump, latched the
+            # thermal episode, and set the error before returning. Avoid a
+            # second generic incident for the same event.
+            if state.get("error") != error:
+                self._set_error(error)
             return
 
         logger.info("Sampling session started")
@@ -597,10 +714,11 @@ class MeasureEngine:
         self._bc_stats.reset()
         self._init_constants()
 
-        bc_ever_positive = False
         bc_neg_alert_sent = False
+        bc_neg_monitor_armed = False
+        bc_neg_since_time = 0.0
         self._first_cycle = True  # skip BC calc on first cycle (priming ATN ≠ sample ATN)
-        session_start_time = time.time()
+        session_start_time = time.monotonic()
         self._session_start_time = session_start_time
         self._initial_loading_pct = -1.0  # captured on first sample
         self._initial_atn = -1.0
@@ -614,6 +732,10 @@ class MeasureEngine:
         )
         self._next_session_indoor_override = False
         self._session_row_count = 0
+        state.set("sample_count", 0)  # per-session counter, ESP32 parity
+        self._pending_skip_note = ""
+        self._pending_time_sync_note = False
+        self._time_sync_realign_pending = False
         self._ref_trend.clear()
         self._ref_drop_active = False
         self._last_led_recovery_s = 0.0
@@ -629,8 +751,13 @@ class MeasureEngine:
 
         # ---- Start storage session ----
         sps_present = self._sps is not None and self._sps.present
+        gps_present = self._gps is not None and self._gps.present
+        session_time_synced = timesync.is_valid()
         try:
-            session_file = self._storage.start_session()
+            session_file = self._storage.start_session(
+                has_sps30=sps_present, has_gps=gps_present,
+                time_synced=session_time_synced,
+            )
         except Exception:
             logger.exception("Storage session start failed")
             self._set_error(ErrorCode.ERR_NONE)
@@ -639,6 +766,16 @@ class MeasureEngine:
 
         email_handler.set_session_start()
         email_handler.send_session_start(session_file)
+        try:
+            geoloc.try_fetch(
+                gps=self._gps,
+                device_name=self._cfg.get_string("device_name", "bcMeter"),
+                api_key=email_handler.get_configured_api_key(
+                    self._cfg.to_flat_dict()
+                ),
+            )
+        except Exception:
+            logger.debug("Session geolocation refresh failed", exc_info=True)
 
         # ---- Prime channels ----
         for ch in range(num_ch):
@@ -671,21 +808,31 @@ class MeasureEngine:
         elif not timesync.is_valid():
             logger.info("Time not synced: skipping mod-5 alignment")
         else:
-            now_dt = datetime.now()
-            mins_to_boundary = (5 - (now_dt.minute % 5)) % 5
-            wait_sec = mins_to_boundary * 60 - now_dt.second
-            if wait_sec <= 0:
-                wait_sec += 300  # already past -> next 5-min boundary
-            logger.info(
-                "Aligning to mod-5 boundary: wait %ds (now %02d:%02d:%02d)",
-                wait_sec, now_dt.hour, now_dt.minute, now_dt.second,
-            )
-            align_deadline = time.monotonic() + wait_sec
             while state.sampling and not stop_event.is_set():
-                remaining = align_deadline - time.monotonic()
-                if remaining <= 0:
+                now_dt = datetime.now()
+                mins_to_boundary = (5 - (now_dt.minute % 5)) % 5
+                wait_sec = mins_to_boundary * 60 - now_dt.second
+                if wait_sec <= 0:
+                    wait_sec += 300  # already past -> next 5-min boundary
+                logger.info(
+                    "Aligning to mod-5 boundary: wait %ds (now %02d:%02d:%02d)",
+                    wait_sec, now_dt.hour, now_dt.minute, now_dt.second,
+                )
+                align_deadline = time.monotonic() + wait_sec
+                clock_changed = False
+                while state.sampling and not stop_event.is_set():
+                    if state.get("time_just_synced"):
+                        self._apply_pending_time_sync()
+                        self._time_sync_realign_pending = False
+                        clock_changed = True
+                        logger.info("Clock changed during alignment; recomputing boundary")
+                        break
+                    remaining = align_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.1, remaining))
+                if not clock_changed:
                     break
-                time.sleep(min(0.1, remaining))
 
         if not state.sampling or stop_event.is_set():
             return
@@ -714,15 +861,22 @@ class MeasureEngine:
                         return
                     if not state.sampling:
                         break
-                else:
+                elif delta < -1.0:
+                    # Overrun >1s — advance past the missed slots so THIS
+                    # cycle is treated as if it started at the latest missed
+                    # slot and start working immediately, no pile-up (ESP32
+                    # parity: skip at least one full slot). Overruns <=1s
+                    # are absorbed without skipping, exactly like the ESP32.
                     slot = max(1.0, float(sample_time_sec))
                     skip = int((-delta) // slot)
-                    if skip > 0:
-                        next_cycle_start += skip * slot
-                        logger.warning(
-                            "Cycle overrun by %.1fs - skipping %d full slot(s) to catch up",
-                            -delta, skip,
-                        )
+                    if skip == 0:
+                        skip = 1
+                    next_cycle_start += skip * slot
+                    logger.warning(
+                        "Cycle overrun by %.1fs - skipping %d full slot(s) to catch up",
+                        -delta, skip,
+                    )
+                    self._record_skip_reason(f"OV{int(-delta * 1000)}")
             first_cadence_cycle = False
             # Advance to next cycle's scheduled start.
             next_cycle_start += float(sample_time_sec)
@@ -730,8 +884,24 @@ class MeasureEngine:
             # Discard any stale notes accumulated during aborted or warmup
             # cycles so they don't leak into this row.
             notes.drain()
-            if state.get("time_just_synced"):
-                state.set("time_just_synced", False)
+            self._apply_pending_time_sync()
+            if self._time_sync_realign_pending:
+                now_dt = datetime.now()
+                mins_to_boundary = (5 - (now_dt.minute % 5)) % 5
+                wait_sec = mins_to_boundary * 60 - now_dt.second
+                if wait_sec <= 0:
+                    wait_sec += 300
+                logger.info(
+                    "Realigning after time sync: wait %ds for next mod-5 boundary",
+                    wait_sec,
+                )
+                if stop_event.wait(wait_sec):
+                    return
+                if not state.sampling:
+                    break
+                self._time_sync_realign_pending = False
+                next_cycle_start = time.monotonic() + float(sample_time_sec)
+            if self._pending_time_sync_note:
                 notes.add(notes.TIME_SYNC)
 
             # Capture cycle-start monotonic time; the BC integration uses
@@ -766,23 +936,29 @@ class MeasureEngine:
             )
 
             # Negative BC alert
-            if primary_bc > 0:
-                bc_ever_positive = True
-            if (
-                not bc_ever_positive
-                and not bc_neg_alert_sent
-                and (time.time() - session_start_time) > 3600
-            ):
-                bc_neg_alert_sent = True
-                notes.add("BC_NEG")
-                incident_log.add("warn", "Session BC negative for >1h — low signal or clean air")
-                try:
-                    email_handler.send_negative_bc_alert(
-                        self._bc_stats.session_avg(),
-                        self._bc_stats.hour_avg(),
-                    )
-                except Exception:
-                    logger.debug("Failed to send negative BC alert email")
+            if not bc_neg_alert_sent:
+                now = time.monotonic()
+                if now - session_start_time >= NEG_BC_ARM_DELAY_S:
+                    if not bc_neg_monitor_armed:
+                        bc_neg_monitor_armed = True
+                        bc_neg_since_time = 0.0
+                        logger.info("Negative BC alert armed after 1h startup ignore window")
+                    if primary_bc > 0:
+                        bc_neg_since_time = 0.0
+                    elif bc_neg_since_time == 0.0:
+                        bc_neg_since_time = now
+                    elif now - bc_neg_since_time >= NEG_BC_DURATION_S:
+                        bc_neg_alert_sent = True
+                        notes.add("BC_NEG")
+                        incident_log.add("warn", "Session BC negative for >1h after startup ignore window")
+                        try:
+                            email_handler.send_negative_bc_alert(
+                                self._bc_stats.session_avg(),
+                                self._bc_stats.hour_avg(),
+                                self.get_session_hours(),
+                            )
+                        except Exception:
+                            logger.debug("Failed to send negative BC alert email")
 
             # ---- Write CSV row (if past warmup) ----
             if time.monotonic() >= self._warmup_end:
@@ -799,8 +975,20 @@ class MeasureEngine:
                             markers.append("MOBILE")
                         if markers:
                             row.notice = " ".join(markers)
-                    self._session_row_count += 1
-                    self._storage.append_row(row)
+                    used_pending_skip = (
+                        self._session_row_count > 0 and bool(self._pending_skip_note)
+                    )
+                    if used_pending_skip:
+                        row.notice = self._pending_skip_note
+                    if self._storage.append_row(row):
+                        self._session_row_count += 1
+                        if used_pending_skip:
+                            self._pending_skip_note = ""
+                        self._pending_time_sync_note = False
+                        # Logged rows only, not warmup cycles (ESP32 parity)
+                        state.set("sample_count", self._session_row_count)
+                    else:
+                        logger.error("CSV row was not written; retaining session markers")
                 except Exception:
                     logger.exception("Failed to write CSV row")
             else:
@@ -809,9 +997,12 @@ class MeasureEngine:
 
         # ---- Session teardown ----
         self._optics.all_off()
-        if self._storage.session_active:
-            self._storage.end_session()
         state.sampling = False
+        if self._storage.session_active:
+            self._apply_pending_time_sync()
+            self._storage.end_session()
+        else:
+            state.consume_time_sync()
         state.set("init_step", InitStep.INIT_IDLE)
         incident_log.add("info", "Measurement session ended")
         logger.info("Sampling session ended")
@@ -879,13 +1070,7 @@ class MeasureEngine:
 
         # Temperature check
         temp = self._read_temperature()
-        if temp is not None and temp > TEMP_LIMIT:
-            logger.error("Preflight: temp=%.1f > %.1f", temp, TEMP_LIMIT)
-            incident_log.add("error", "Preflight overtemp: %.1f > %.0f", temp, TEMP_LIMIT)
-            try:
-                email_handler.send_temperature_alert(temp)
-            except Exception:
-                pass
+        if temp is not None and self._handle_overtemperature(temp, "preflight"):
             return ErrorCode.ERR_OVERTEMP
 
         # 5-second averaged read for initial filter display in UI
@@ -927,8 +1112,8 @@ class MeasureEngine:
         sen_sum = 0.0
         ref_sum = 0.0
         count = 0
-        end_t = time.time() + PRIME_DURATION_S
-        while time.time() < end_t:
+        end_t = time.monotonic() + PRIME_DURATION_S
+        while time.monotonic() < end_t:
             try:
                 s = self._adc.read_sensor() * self._cal_k[ch]
                 r = self._adc.read_reference()
@@ -969,6 +1154,10 @@ class MeasureEngine:
         Returns (MeasureRow, bc_array, aborted).
         """
         row = MeasureRow()
+        # Keep a monotonic provenance marker alongside the wall timestamp.
+        # Storage uses it to distinguish an in-flight pre-sync row from a row
+        # created after the clock step, even if both are appended later.
+        row._timestamp_monotonic = time.monotonic()
         row.date, row.time_str = _timestamp_pair()
 
         sample_time_sec = self._cfg.get_int("sample_time", 300)
@@ -980,13 +1169,12 @@ class MeasureEngine:
         correction_factor = self._cfg.get_float("device_specific_correction_factor", 1.0)
         ambient_pressure_correction = self._cfg.get_bool("ambient_pressure_correction", True)
 
-        cycle_start = time.time()
+        cycle_start = time.monotonic()
         ch_duration = sample_time_sec / num_ch
 
         # --- Read environmental sensors (pre-cycle) ---
         env_temp, env_hum, env_pressure = self._read_env()
-        if env_temp is not None and env_temp > TEMP_LIMIT:
-            self._set_error(ErrorCode.ERR_OVERTEMP)
+        if env_temp is not None and self._handle_overtemperature(env_temp, "measurement"):
             return row, [], True
 
         # --- Per-channel ADC sampling ---
@@ -1016,9 +1204,9 @@ class MeasureEngine:
             led_recovered_this_cycle = False
             self._optics.led_on(ch)
             time.sleep(LED_SETTLE_S)
-            ch_start = time.time()
+            ch_start = time.monotonic()
 
-            while (time.time() - ch_start) < ch_duration:
+            while (time.monotonic() - ch_start) < ch_duration:
                 if not state.sampling or stop_event.is_set():
                     aborted = True
                     break
@@ -1064,7 +1252,7 @@ class MeasureEngine:
                             ref_bufs[ch].clear()
                             self._optics.led_on(ch)
                             time.sleep(0.5)
-                            ch_start = time.time()
+                            ch_start = time.monotonic()
                             continue
                         logger.error("CH%d: proactive LED recovery failed", ch)
                         incident_log.add("error", "CH%d ADC saturated, LED recovery failed — no filter?", ch)
@@ -1074,6 +1262,7 @@ class MeasureEngine:
                             )
                         except Exception:
                             pass
+                        self._record_skip_reason(f"SATf{ch}")
                         self._set_error(ErrorCode.ERR_ADC_SATURATED)
                         aborted = True
                         break
@@ -1087,22 +1276,26 @@ class MeasureEngine:
                     ref_bufs[ch].append(r)
 
                 # Transition warmup -> sampling status mid-cycle
-                now = time.time()
-                warmup_now = time.monotonic()
+                now = time.monotonic()
                 if (state.get("init_step") == InitStep.INIT_SETTLING
-                        and warmup_now >= self._warmup_end):
+                        and now >= self._warmup_end):
                     state.update(init_step=InitStep.INIT_DONE, warmup_progress=100)
                     logger.info("Warmup complete, logging started")
 
                 # Flow sampling + pump health check
-                while now >= next_flow_sample_time:
+                flow_due, next_flow_sample_time = _periodic_due(
+                    now, next_flow_sample_time, FLOW_SAMPLE_INTERVAL_S,
+                )
+                if flow_due:
                     # Check pump stall recovery state
                     if self._pump.is_recovering():
                         logger.warning("Pump recovering from stall, aborting cycle")
+                        self._record_skip_reason("PRC")
                         aborted = True
                         break
                     if self._pump.is_failed():
                         logger.error("Pump stall fatal — too many recoveries")
+                        self._record_skip_reason("PFL")
                         self._set_error(ErrorCode.ERR_FLOW_ZERO)
                         aborted = True
                         break
@@ -1113,8 +1306,6 @@ class MeasureEngine:
                         f = 0.0
                     flow_sum += f
                     flow_count += 1
-
-                    next_flow_sample_time += FLOW_SAMPLE_INTERVAL_S
 
                 if aborted:
                     break
@@ -1167,6 +1358,7 @@ class MeasureEngine:
                                     )
                                 except Exception:
                                     pass
+                                self._record_skip_reason(f"SATf{ch}")
                                 self._set_error(ErrorCode.ERR_ADC_SATURATED)
                                 aborted = True
                     else:
@@ -1179,7 +1371,9 @@ class MeasureEngine:
                             ch, rejected_ratio * 100,
                         )
                         state.set("warning_msg", "Low optical signal - trend only; replace filter")
-                        notes.add(f"LOW{int(rejected_ratio * 100)}")
+                        # ESP32 parity: LOW is a skip/degradation reason and
+                        # goes to `notice` via recordSkipReason, not to notes.
+                        self._record_skip_reason(f"LOW{int(rejected_ratio * 100)}")
                         if buf_count >= 5:
                             sen_mean, _, _ = sigma_reject(sen_bufs[ch], SIGMA_REJECT_LIMIT)
                             ref_mean, _, _ = sigma_reject(ref_bufs[ch], SIGMA_REJECT_LIMIT)
@@ -1232,7 +1426,7 @@ class MeasureEngine:
 
         # ---- Flow average ----
         avg_flow = (flow_sum / flow_count) if flow_count > 0 else target_flow
-        cycle_duration_s = time.time() - cycle_start
+        cycle_duration_s = time.monotonic() - cycle_start
         # BC integration duration: use the inter-cycle interval (monotonic
         # time between the previous cycle start and this one) rather than
         # the per-cycle work time.  deltaATN spans previous-cycle ATN to
@@ -1348,6 +1542,7 @@ class MeasureEngine:
                 max_duty = self._cfg.get("max_pump_duty", 255)
                 incident_log.add("warn", "No airflow for 3 cycles — kicking pump to duty %d", max_duty)
                 logger.warning("Zero-flow recovery: duty=%d for 3s", max_duty)
+                self._record_skip_reason(f"ZF{self._zero_flow_cycles}")
                 self._pump.set_duty(max_duty)
                 time.sleep(3)
                 recovery_flow = self._pump.get_flow_avg(0.5)
@@ -1378,11 +1573,12 @@ class MeasureEngine:
             notes.add(notes.ADC_LO)
         log_this_row = time.monotonic() >= self._warmup_end
         if log_this_row and sample_counts and sample_counts[0] >= 5:
+            now_monotonic = time.monotonic()
             self._check_reference_drop(
                 ref_avg[0], sen_avg[0], self._last_atn[0], bc_arr[0],
-                avg_flow, row.temperature, time.time(), adc_low_limit,
+                avg_flow, row.temperature, now_monotonic, adc_low_limit,
             )
-        row.notice = notes.drain()
+        row.notes = notes.drain()
 
         # ---- GPS ----
         if self._gps and self._gps.present:
@@ -1392,6 +1588,11 @@ class MeasureEngine:
                     row.latitude = gps_data.lat
                     row.longitude = gps_data.lon
                     row.altitude = gps_data.altitude
+                elif row.pressure > 500.0:
+                    # Barometric fallback using QNH from Open-Meteo
+                    # (±20-50m) or ISA (±200m) — ESP32 parity
+                    alt = 44330.0 * (1.0 - (row.pressure / qnh.get()) ** 0.190295)
+                    row.altitude = alt if alt > 0.0 else 0.0
             except Exception:
                 logger.debug("GPS read failed")
 
@@ -1404,7 +1605,6 @@ class MeasureEngine:
             last_temp=row.temperature,
             last_humidity=row.humidity,
             last_flow=avg_flow,
-            sample_count=state.get("sample_count") + 1,
         )
 
         return row, bc_arr, False
@@ -1608,7 +1808,7 @@ class MeasureEngine:
         self._optics.set_led_duty(ch, duty)
         self._cfg.save()
         notes.add(notes.LED_REC)
-        self._last_led_recovery_s = time.time()
+        self._last_led_recovery_s = time.monotonic()
         incident_log.add("warn", "CH%d LED duty adjusted %d->%d", ch, old_duty, duty)
         try:
             email_handler.send_adc_saturation_recovery(ch, old_duty, duty)
@@ -1691,14 +1891,71 @@ class MeasureEngine:
     # Error handling
     # ------------------------------------------------------------------
 
-    def _set_error(self, error: ErrorCode):
+    def _temperature_shutdown_c(self) -> float:
+        """Return the configured emergency cutoff within its safety bounds."""
+        configured = self._cfg.get_float("temperature_shutdown_c", TEMP_LIMIT)
+        if not math.isfinite(configured):
+            configured = TEMP_LIMIT
+        return max(TEMP_LIMIT_MIN, min(TEMP_LIMIT_MAX, configured))
+
+    def _rearm_overtemperature_if_cooled(self, temperature_c: float) -> bool:
+        """Rearm incident delivery after the current thermal episode ends."""
+        threshold_c = self._temperature_shutdown_c()
+        if (self._overtemp_incident_latched
+                and temperature_c <= threshold_c - TEMP_REARM_HYSTERESIS):
+            self._overtemp_incident_latched = False
+            logger.info(
+                "Overtemperature incident rearmed at %.1fC (threshold %.1fC)",
+                temperature_c, threshold_c,
+            )
+            return True
+        return False
+
+    def _handle_overtemperature(self, temperature_c: float, phase: str) -> bool:
+        """Report one incident per thermal episode and stop the measurement."""
+        threshold_c = self._temperature_shutdown_c()
+        state.set("last_temp", temperature_c)
+        self._rearm_overtemperature_if_cooled(temperature_c)
+        if temperature_c < threshold_c:
+            return False
+
+        send_incident = not self._overtemp_incident_latched
+        if send_incident:
+            # Latch before enqueueing so exceptions/retries cannot generate a
+            # second notification for the same still-hot episode.
+            self._overtemp_incident_latched = True
+            incident_log.add(
+                "error",
+                "Overtemperature shutdown: %.1fC >= %.1fC (%s)",
+                temperature_c, threshold_c, phase,
+            )
+
+        # Safety state and hardware shutdown take priority over constructing
+        # or persisting the notification payload.
+        self._set_error(ErrorCode.ERR_OVERTEMP, record_incident=False)
+        try:
+            self._pump.shutdown()
+        except Exception:
+            logger.exception("Failed to stop pump during overtemperature shutdown")
+
+        if send_incident:
+            try:
+                email_handler.send_overtemperature_incident(
+                    temperature_c, threshold_c, phase,
+                )
+            except Exception:
+                logger.exception("Failed to enqueue overtemperature incident")
+        return True
+
+    def _set_error(self, error: ErrorCode, record_incident: bool = True):
         """Set error state and stop sampling."""
         state.update(
             error=error,
             sampling=False,
             warmup_progress=self._current_warmup_progress(),
         )
-        incident_log.add("error", "Measurement error: %s", error.name)
+        if record_incident:
+            incident_log.add("error", "Measurement error: %s", error.name)
         logger.error("ERROR %d: %s -- stopping", int(error), error.name)
 
     @staticmethod

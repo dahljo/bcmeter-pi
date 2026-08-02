@@ -9,7 +9,13 @@ from unittest.mock import patch
 from bcmeter import ota_check
 from bcmeter.config import CfgStore
 from bcmeter.errors import ErrorCode, InitStep
-from bcmeter.measure import MeasureEngine, TEMP_LIMIT
+from bcmeter.measure import (
+    MeasureEngine,
+    TEMP_LIMIT,
+    TEMP_LIMIT_MAX,
+    TEMP_LIMIT_MIN,
+    TEMP_REARM_HYSTERESIS,
+)
 from bcmeter.state import state
 
 try:
@@ -206,8 +212,21 @@ class WarmupRecoveryTests(unittest.TestCase):
         self.assertTrue(ota_check._is_newer("v1.6.10", "1.6.9"))
         self.assertFalse(ota_check._is_newer("v1.6.9", "1.6.10"))
 
-    def test_emergency_temperature_cutoff_stays_at_65c(self):
+    def test_emergency_temperature_cutoff_defaults_to_65c(self):
         self.assertEqual(TEMP_LIMIT, 65.0)
+        self.assertEqual(TEMP_LIMIT_MIN, 40.0)
+        self.assertEqual(TEMP_LIMIT_MAX, 80.0)
+        self.assertEqual(TEMP_REARM_HYSTERESIS, 2.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("bcmeter.config._wifi_mac_suffix", return_value=""):
+                cfg = CfgStore(str(Path(tmp) / "config.json"))
+            self.assertEqual(cfg.get_float("temperature_shutdown_c"), 65.0)
+            entry = json.loads(cfg.to_json())["temperature_shutdown_c"]
+            self.assertEqual(entry["parameter"], "dev:system")
+            cfg.set_float("temperature_shutdown_c", 100.0)
+            self.assertEqual(cfg.get_float("temperature_shutdown_c"), 80.0)
+            self.assertTrue(cfg.apply_json({"temperature_shutdown_c": 20.0}))
+            self.assertEqual(cfg.get_float("temperature_shutdown_c"), 40.0)
 
     def test_interface_uses_backend_progress_and_resets_filter_memory(self):
         interface = (
@@ -225,6 +244,14 @@ class WarmupRecoveryTests(unittest.TestCase):
             interface,
         )
         self.assertNotIn("Date.now()-warmupStartMs", interface)
+        self.assertIn(
+            "if(d.status==3&&d.error===3&&!alertPumpShown)", interface,
+        )
+        self.assertNotIn(
+            "d.status==2&&!alertPumpShown&&d.flow<0.05", interface,
+        )
+        self.assertIn("item.key==='temperature_shutdown_c'", interface)
+        self.assertIn("inp.min=40;inp.max=80;inp.step=.5", interface)
 
 
 if __name__ == "__main__":

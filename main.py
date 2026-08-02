@@ -58,6 +58,7 @@ from bcmeter.sps30 import SPS30
 from bcmeter.storage import Storage, was_session_running
 from bcmeter.measure import MeasureEngine
 from bcmeter.wifimgr import NetworkManager
+from bcmeter.modbus_tcp import ModbusServer
 from bcmeter.gps import GPS
 from bcmeter.bme280 import BME280
 from bcmeter.email_handler import init_sender as init_email_sender
@@ -259,12 +260,18 @@ def main():
         log_dir=os.path.join(BASE_DIR, "logs"),
         log_pump_duty=cfg.get_bool("log_pump_duty", False),
     )
+    timesync.set_log_boundary_provider(storage.capture_time_sync_boundary)
+    timesync.set_log_sync_event_handler(storage.handle_time_sync_event)
+    timesync.set_log_sync_lost_handler(storage.handle_time_sync_lost)
 
     # Measurement engine
     engine = MeasureEngine(
         cfg=cfg, adc=adc, optics=optics, pump=pump,
         sensors=sensors, storage=storage, gps=gps,
     )
+
+    # Read-only Modbus TCP server; opens a socket only when enabled in config.
+    modbus = ModbusServer(cfg=cfg, state_mgr=state, storage=storage, pump=pump)
 
     # Network manager
     network_mgr = NetworkManager(cfg, base_dir=BASE_DIR)
@@ -294,6 +301,12 @@ def main():
         logger.info("System time is valid")
     else:
         logger.warning("System time may not be synced")
+    threading.Thread(
+        target=timesync.monitor_sync,
+        args=(stop_event,),
+        daemon=True,
+        name="timesync_monitor",
+    ).start()
 
     # OTA update checker
     ota_check.init(stop_event)
@@ -317,7 +330,7 @@ def main():
     set_dependencies(
         cfg=cfg, state_mgr=state, engine=engine, storage=storage,
         network_manager=network_mgr, gps=gps, status_led=status_led,
-        pump=pump,
+        pump=pump, modbus=modbus,
     )
 
     # ── Start background threads ───────────────────────────
@@ -344,6 +357,11 @@ def main():
             name="network", daemon=True
         )
         threads.append(t_network)
+
+    t_modbus = threading.Thread(
+        target=modbus.task, args=(stop_event,), name="modbus", daemon=True
+    )
+    threads.append(t_modbus)
 
     # Status LED thread
     if not cfg.get_bool("disable_led", False) and pi:
