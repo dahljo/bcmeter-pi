@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: >-
+  If you use bcMeter (DIY) in research, please cite the software using these
+  metadata.
+title: "bcMeter (DIY) — Raspberry Pi"
+type: software
+abstract: >-
+  Source-available Raspberry Pi software for the bcMeter optical black-carbon
+  monitor, including measurement control, airflow regulation, data logging,
+  environmental sensors, and a local web interface.
+authors:
+  - family-names: "Dahl-Jasper"
+    given-names: "Jonas"
+    affiliation: "bcMeter, Berlin, Germany"
+    email: "jd@bcmeter.org"
+repository-code: "https://github.com/dahljo/bcmeter-pi"
+url: "https://bcmeter.org"
+license: "CC-BY-NC-4.0"
+keywords:
+  - "black carbon"
+  - "aerosol instrumentation"
+  - "air-quality monitoring"
+  - "Raspberry Pi"
+  - "citizen science"
